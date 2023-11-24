@@ -259,6 +259,6 @@ $RECYCLE.BIN/
 .ionide
 
 ### Project ###
-python-slideshow/config_processors/*
-!python-slideshow/config_processors/__init__.py
-python-slideshow/misc/
+slideshow/config_processors/*
+!slideshow/config_processors/__init__.py
+slideshow/misc/
