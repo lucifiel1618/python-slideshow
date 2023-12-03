@@ -1,10 +1,11 @@
+from multiprocessing.pool import AsyncResult
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 import multiprocessing
 import queue
-from typing import Iterable, Callable, Optional
+from typing import Iterable, Callable, Optional, TypedDict
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QLabel, QGraphicsOpacityEffect, QWidget, QHBoxLayout, QFrame
@@ -21,6 +22,7 @@ from . import FFMPEGObject
 from . import utils
 
 logger = utils.get_logger('SlideShow.GUIPyQt6FFMPEG')
+
 
 class VLCMediaPlayer(QObject):
     mediaStatusChanged = pyqtSignal(int)
@@ -76,14 +78,14 @@ def process_meta(command):
 
 
 def _ffmpeg_read(
-    queue: queue.Queue,
+    queue: queue.Queue[AsyncResult],
     iterable: Iterable[ET.Element],
     delay: float,
     size: tuple[int, int],
     dpath: str,
     segment_time: int = 10,
     log_level: Optional[str] = None
-    ):
+) -> None:
     # with multiprocessing.Pool(None, limit_cpu) as pool:
     with multiprocessing.Pool(multiprocessing.cpu_count() - 1) as pool:
         ffmpeg_object = FFMPEGObject.FFMPEGObjectLive(delay, size, log_level=log_level)
@@ -118,12 +120,17 @@ def _ffmpeg_read(
         queue.join()
 
 
+class FStat(TypedDict):
+    path: Path
+    size: int
+
+
 class CleanUpThread(QThread):
     max_size: int = 10
-    flist: list[list[Path, Optional[int]]] = []
+    flist: list[FStat] = []
     lock: QMutex = QMutex()
 
-    def run(self):
+    def run(self) -> None:
         flist = self.flist
         self.lock.lock()
         total_size = 0
@@ -135,17 +142,18 @@ class CleanUpThread(QThread):
             return
         i = 0
         try:
-            for pair in it:
-                path, size = pair
-                if size is None:
+            for fstat in it:
+                path = fstat['path']
+                size = fstat['size']
+                if size < 0:
                     size = path.stat().st_size
-                    pair[1] = size
+                    fstat['size'] = size
                 total_size += size
                 if total_size > self.max_size:
-                    i = flist.index(pair)
+                    i = flist.index(fstat)
                     break
-            for path, _ in flist[:i]:
-                path.unlink()
+            for fstat in flist[:i]:
+                fstat['path'].unlink()
             flist[:i] = []
         except FileNotFoundError:
             pass
@@ -155,7 +163,7 @@ class CleanUpThread(QThread):
 class ReadMediaThread(QThread):
     def __init__(
         self,
-        queue: queue.Queue,
+        q: queue.Queue[AsyncResult],
         media_objects: Iterable[ET.Element],
         delay: float,
         size: tuple[int, int],
@@ -164,14 +172,14 @@ class ReadMediaThread(QThread):
         parent: Optional[QObject] = None
     ):
         super().__init__(parent)
-        self.queue: queue.Queue = queue
+        self.queue: queue.Queue[AsyncResult] = q
         self.media_objects: Iterable[ET.Element] = media_objects
         self.delay: float = delay
         self.size: tuple[int, int] = size
         self.dpath: str = dpath
         self.log_level = log_level
 
-    def run(self):
+    def run(self) -> None:
         _ffmpeg_read(self.queue, self.media_objects, self.delay, self.size, self.dpath, log_level=self.log_level)
 
 
@@ -205,7 +213,7 @@ class StdInfo(QLabel):
         self.parent().resized.connect(self.set_position)
 
     @pyqtSlot()
-    def set_position(self, pos=None):
+    def set_position(self, pos=None) -> None:
         if pos is None:
             coords = self.parent().geometry().getRect()
             if self.align & Qt.AlignmentFlag.AlignLeft:
@@ -223,7 +231,7 @@ class StdInfo(QLabel):
             pos = (x, y)
         self.move(*pos)
 
-    def display_func(self, *x):
+    def display_func(self, *x) -> None:
         self.setText(self.text_func(*x))
         self.adjustSize()
         self.set_position()
@@ -232,7 +240,7 @@ class StdInfo(QLabel):
             self.anim.stop()
             self.anim.start()
 
-    def display_str(self):
+    def display_str(self) -> None:
         self.setText(self.text_func)
         self.adjustSize()
         self.set_position()
@@ -263,7 +271,7 @@ class App(QWidget):
         self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files)
         self.set_size()
         self.maxqsize: int = 10
-        self.queue: queue.Queue = queue.Queue(qsize)
+        self.queue: queue.Queue[AsyncResult[dict[str, str]]] = queue.Queue(qsize)
         self._tempd = QTemporaryDir()
         self.destroyed.connect(self._tempd.remove)
         self._played: list[str] = []
@@ -301,7 +309,7 @@ class App(QWidget):
             lambda: f'fps: {1000. / self.delay * self.rate:.1f}',
             align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
             parent=self
-            )
+        )
         self._changed_playspeed.connect(self.info_fps.display)
 
         self.info_playspeed: StdInfo = StdInfo(
@@ -328,23 +336,23 @@ class App(QWidget):
             print(f'App.{meta.get("command")}')
             exec(f'self.{meta.get("command")}')
 
-    def clean_up(self, path):
-        CleanUpThread.flist.append([Path(path), None])
+    def clean_up(self, path) -> None:
+        CleanUpThread.flist.append({'path': Path(path), 'size': -1})
         t = CleanUpThread(self)
         t.start()
         logger.debug(f'Cleaning up {path}')
         self.destroyed.connect(t.terminate)
 
-    def show_slides(self):
+    def show_slides(self) -> None:
         t = self.media_thread
         t.start()
         self.play_next(True)
 
-    def keyPressEvent(self, e):
+    def keyPressEvent(self, e) -> None:
         super().keyPressEvent(e)
         self._keyPressed.emit(e)
 
-    def play_pause(self, status: bool | None = None):
+    def play_pause(self, status: Optional[bool] = None) -> None:
         if status is None:
             status = not self.status
         self.status = status
@@ -354,7 +362,7 @@ class App(QWidget):
         else:
             self.MediaPlayer.setPlaybackRate(0)
 
-    def on_key(self, e):
+    def on_key(self, e) -> None:
         match e.key():
             case Qt.Key.Key_Escape:  # Esc: Exit
                 self.close()
@@ -376,25 +384,25 @@ class App(QWidget):
                 if e.modifiers() == Qt.KeyboardModifier.ControlModifier:  # Ctrl + Enter: Toggle Full Screen
                     self.toggle
 
-    def toggle(self):
+    def toggle(self) -> None:
         if self.isFullScreen():
             self.showNormal()
         else:
             self.showFullScreen()
 
-    def toggle_debug(self):
+    def toggle_debug(self) -> None:
         debug_is_visible = self.debug_info.isVisible()
         self.debug_info.setVisible(not debug_is_visible)
         if self.end_info is not None:
             self.end_info.setVisible(not debug_is_visible)
 
-    def end_of_media(self, status):
+    def end_of_media(self, status) -> None:
         if status == self.MediaPlayer.MediaStatus.EndOfMedia:
             self.play_next()
 
-    def play_next(self, first: bool = False):
+    def play_next(self, first: bool = False) -> None:
         if first or self.queue.unfinished_tasks > 0:
-            entry = self.queue.get().get()
+            entry: FFMPEGObject.VideoMeta = self.queue.get().get()
             self.queue.task_done()
         else:
             self.play_pause(False)
@@ -424,7 +432,9 @@ class App(QWidget):
         self.MediaPlayer.setPlaybackRate(self.rate)
         self._changed_playspeed.emit()
 
-    def set_size(self, width: Optional[int] = None, height: Optional[int] = None, aspect: str = '16X9'):
+    def set_size(
+        self, width: Optional[int] = None, height: Optional[int] = None, aspect: str = '16X9'
+    ) -> None:
         if (width, height) == (None, None):
             match aspect:
                 case '4X3':
@@ -447,7 +457,7 @@ class App(QWidget):
 
     resized = pyqtSignal()
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event) -> None:
         ev = super().resizeEvent(event)
         self.resized.emit()
         # logger.info('size: {}'.format(self.size()))

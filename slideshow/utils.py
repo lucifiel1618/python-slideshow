@@ -6,13 +6,15 @@ from collections import Counter
 import math
 import ffmpeg
 import multiprocessing as mp
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence, TypeVar
 import functools
 
 import re
 
 LOG_LEVEL = 'DEBUG'
 COLOR_LOG = True
+
+T = TypeVar('T')
 
 
 def get_logger(name, color=None):
@@ -27,9 +29,9 @@ def get_logger(name, color=None):
             logger.info('coloredlogs not installed. colored logging will not be populated.')
 
     fmt = {
-    'fmt': '{asctime} {name} {levelname} {message}',
-    'datefmt': '%H:%M:%S',
-    'style': '{'
+        'fmt': '{asctime} {name} {levelname} {message}',
+        'datefmt': '%H:%M:%S',
+        'style': '{'
     }
     logger = logging.getLogger(name)
     if logger.hasHandlers():
@@ -195,3 +197,12 @@ def expand_template(
     template = re._parser.parse_template(template, r)
     expanded = re._parser.expand_template(template, r)
     return expanded
+
+
+def sampled(dataset: Sequence[T], sample_size: int = 3) -> Sequence[T]:
+    n = len(dataset)
+    if sample_size >= n:
+        return dataset
+    step_size = n / sample_size
+    result = [dataset[0], *(dataset[int(i * step_size)] for i in range(1, sample_size))]
+    return result

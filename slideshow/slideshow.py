@@ -1,6 +1,4 @@
 #!/opt/homebrew/bin/python3
-# PYTHON_ARGCOMPLETE_OK
-# -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 from pathlib import Path
 import argparse
@@ -8,6 +6,7 @@ import sys
 from . import utils
 
 PLAY = 'qt+ffmpeg'
+
 
 def main():
     parser = argparse.ArgumentParser(description='Python Slideshow',
@@ -49,7 +48,7 @@ def main():
             backend_parser.add_argument('--empty', action='store_true',
                                         help='Files will not be imported if `empty` is set.')
             backend_parser.add_argument('-R', '--reg', nargs='*', default=[], help='<key>:<reg_pattern> pairs')
-            backend_parser.add_argument('-S', '--sorter', nargs='?', const='SSIM', help='sorter')
+            backend_parser.add_argument('-S', '--sorter', nargs='?', const='SSIM', choices=['SSIM', 'pixelwise'], help='sorter')
             backend_parser.add_argument('--maker', default=None, const=True, nargs='?',
                                         help='choose a template maker for album file generation or \
                                         activate to auto-generate a template maker')
@@ -87,9 +86,7 @@ def main():
     if 'qt' in gui_backend:
         if gui_backend == 'qt':
             gui_backend = 'qt6'
-        if gui_backend == 'qt5':
-            from . import GUIPyQt5 as GUIPyQt
-        elif gui_backend == 'qt6' and player_backend == 'ffmpeg':
+        if gui_backend == 'qt6' and player_backend == 'ffmpeg':
             from . import GUIPyQt6FFMPEG as GUIPyQt
         elif gui_backend == 'qt6':
             from . import GUIPyQt6 as GUIPyQt

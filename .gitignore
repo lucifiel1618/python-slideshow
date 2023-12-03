@@ -260,5 +260,5 @@ $RECYCLE.BIN/
 
 ### Project ###
 slideshow/config_processors/*
-!slideshow/config_processors/__init__.py
+# !slideshow/config_processors/__init__.py
 slideshow/misc/

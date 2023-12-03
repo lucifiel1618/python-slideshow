@@ -2,7 +2,7 @@ from xml.etree import ElementTree as ET
 from pathlib import Path
 import shutil
 import functools
-from typing import Optional, Callable, Any
+from typing import Generic, Optional, Callable, Any, TypeVar, TypedDict
 import ffmpeg
 
 
@@ -10,9 +10,12 @@ BIN_DIR = Path('/opt/homebrew/bin/')
 FFMPEG_BIN = str(BIN_DIR / 'ffmpeg')
 FFPROBE_BIN = str(BIN_DIR / 'ffprobe')
 
+T = TypeVar('T')
 
-class FFMPEGObject:
-    def __init__(self,
+
+class FFMPEGObject(Generic[T]):
+    def __init__(
+        self,
         delay: float,
         size: tuple[int, int],
         fps: int,
@@ -35,7 +38,7 @@ class FFMPEGObject:
         self.total_duration: float = 0.
 
     @staticmethod
-    def probe(path: Path):
+    def probe(path: Path | str) -> dict[str, Any]:
         path = str(path)
         return ffmpeg.probe(path, cmd=FFPROBE_BIN)
 
@@ -49,10 +52,10 @@ class FFMPEGObject:
         return stream.split()[i]
 
     @staticmethod
-    def _get_media_duration(path: str):
+    def _get_media_duration(path: str) -> float:
         try:
             return float(FFMPEGObject.probe(path)['format']['duration'])
-        except Exception as e:
+        except ffmpeg.Error as e:
             print(e.stderr)
             raise e
 
@@ -65,12 +68,13 @@ class FFMPEGObject:
         pts: str = '',
         dar: str = ''
     ) -> ffmpeg.Stream:
-        stream = (stream.filter('scale', *size, force_original_aspect_ratio='decrease')
-                        .filter('pad', *size, '(ow-iw)/2')
-                        .filter('setsar', '1')
-                        .filter('fps', fps)
-                        .filter('setdar', dar)
-                       )
+        stream = (
+            stream.filter('scale', *size, force_original_aspect_ratio='decrease')
+                  .filter('pad', *size, '(ow-iw)/2')
+                  .filter('setsar', '1')
+                  .filter('fps', fps)
+                  .filter('setdar', dar)
+        )
         if pts:
             stream = stream.filter('setpts', pts)
         # if media_type == 'image':
@@ -84,7 +88,7 @@ class FFMPEGObject:
             for overlay_stream, _ in overlays:
                 stream = stream.overlay(overlay_stream)
         else:
-            media_path = media.get('path')
+            media_path: str = media.get('path')
             match media_type := media.get('media_type'):
                 case 'image':
                     duration = self.image_framerate
@@ -102,7 +106,9 @@ class FFMPEGObject:
                     stream = ffmpeg.input(media_path, stream_loop=loop - 1)
                 case _:
                     raise IOError(f'UNKNOWN STREAM: {media_type}({media_path})')
-            stream = self._apply_standard_filters(stream, media_type, self.size, self.fps, self.pts, self.dar)
+            stream = self._apply_standard_filters(
+                stream, media_type, self.size, self.fps, self.pts, self.dar
+            )
             stream = self._auto_split_stream(stream, self.streams_used)
         return stream, duration
 
@@ -112,10 +118,11 @@ class FFMPEGObject:
         self.total_duration += duration
 
     def output_stream(self, fname: str) -> ffmpeg.Stream:
-        stream = (ffmpeg.concat(*self.streams)
-                        .output(fname, **self.output_kwds)
-                        .global_args(*self.run_args)
-                        )
+        stream = (
+            ffmpeg.concat(*self.streams)
+                  .output(fname, **self.output_kwds)
+                  .global_args(*self.run_args)
+        )
         return stream
 
     @staticmethod
@@ -123,8 +130,8 @@ class FFMPEGObject:
         fname: str,
         outstream: ffmpeg.Stream,
         temp_fname: Optional[str] = None,
-        callback: Optional[Callable[str, Any]] = None
-    ) -> Optional[Any]:
+        callback: Optional[Callable[[str], T]] = None
+    ) -> T | None:
         _fname = temp_fname if temp_fname is not None else fname
         outstream.run(cmd=FFMPEG_BIN, overwrite_output=True)
         if temp_fname is not None:
@@ -140,25 +147,32 @@ class FFMPEGObject:
         self,
         path: Path,
         temp_path: Optional[Path] = None
-    ) -> Any:
+    ) -> Callable[[], T | None]:
         _path = temp_path if temp_path is not None else path
         fname = str(path)
         temp_fname = str(temp_path) if temp_path is not None else None
         outstream = self.output_stream(str(_path))
         callback = self.callback
-        return functools.partial(self._compile_call, fname, outstream, temp_fname, callback)
+        f = functools.partial(self._compile_call, fname, outstream, temp_fname, callback)
+        return f
 
-    def run(self, path: Path, temp_path: Optional[Path] = None):
+    def run(self, path: Path, temp_path: Optional[Path] = None) -> Any:
         return self.compile_call(path, temp_path)()
 
-    def reset(self):
+    def reset(self) -> None:
         self.streams.clear()
         self.streams_used.clear()
         self.total_duration = 0
 
 
+class VideoMeta(TypedDict):
+    tag: str
+    content: str
+
+
 class FFMPEGObjectLive(FFMPEGObject):
-    def __init__(self,
+    def __init__(
+        self,
         delay: float,
         size: tuple[int, int],
         fps: int = 30,
@@ -177,12 +191,13 @@ class FFMPEGObjectLive(FFMPEGObject):
         )
 
     @staticmethod
-    def callback(fname: str):
+    def callback(fname: str) -> VideoMeta:
         return {'tag': 'video', 'content': fname}
 
 
 class FFMPEGObjectOutput(FFMPEGObject):
-    def __init__(self,
+    def __init__(
+        self,
         delay: float,
         size: tuple[int, int],
         fps: int,

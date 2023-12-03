@@ -1,18 +1,15 @@
 import os
-import re
-import mimetypes
 from xml.etree import ElementTree as ET
 from itertools import cycle, chain
 from pathlib import Path
-from functools import partial
+from functools import partial, singledispatch, singledispatchmethod
 from zipfile import ZipFile
 import tempfile
-from .utils import get_logger, AspectEstimator
+import mimetypes
 import unicodedata
-
-from typing import Callable, Iterable, Sequence, Optional
-
+from typing import Callable, Iterable, Iterator, Literal, Sequence, Optional, overload
 from . import Config
+from .utils import get_logger, AspectEstimator
 
 logger = get_logger('slideshow.AlbumReader')
 # logger.setLevel(40)
@@ -21,6 +18,7 @@ mimetypes.add_type('text/album', '.album')
 
 ALBUM_FILE = 'pictures.album'
 CONFIG_FILE = 'pictures.yml'
+
 
 class FileReader:
     def __init__(self, archive: Optional[Path | str] = None):
@@ -34,39 +32,48 @@ class FileReader:
             self._archiveobj = None
             self.read = self._read_from_flist
 
-    def _read_from_archive(self, f):
+    def _read_from_archive(self, f) -> str:
         return self._archiveobj.extract(
             unicodedata.normalize('NFC', str(Path(f).relative_to('.'))), self._tempdir.name
-            )
+        )
 
-    def _read_from_flist(self, f):
+    def _read_from_flist(self, f: str) -> str:
         return f
 
-    def close(self):
+    def close(self) -> None:
         if self._tempdir is not None:
             self._tempdir.cleanup()
         if self._archiveobj is not None:
             self._archiveobj.close()
 
+
 class AlbumReader:
-    def __init__(self, *iterable: Iterable[str], **kwds):
-        self._iterator: Iterable[str] = self._generator(iterable, **kwds)
+    def __init__(
+        self,
+        *iterable: str,
+        repeat: bool = True,
+        chapters: Optional[str] = None
+    ):
+        self._iterator: Iterator[ET.Element] = self._generator(iterable, repeat=repeat, chapters=chapters)
         self.repeat_video: int = 3
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[ET.Element]:
         return self._iterator
 
-    def preprocess_meta(self):
-        results = []
-        for e in self._iterator:
-            if e.tag != 'meta':
-                break
-            results.append(e)
-        self._iterator = chain.from_iterable([(e,), self._iterator])
+    def preprocess_meta(self) -> list[ET.Element]:
+        results: list[ET.Element] = []
+        try:
+            for e in self._iterator:
+                if e.tag != 'meta':
+                    break
+                results.append(e)
+            self._iterator = chain.from_iterable([(e,), self._iterator])
+        except StopIteration:
+            pass
         return results
 
     @staticmethod
-    def _get_media_type(url):
+    def _get_media_type(url: str) -> str:
         mimetype_submimetype = mimetypes.guess_type(url)[0]
         if mimetype_submimetype is not None:
             mimetype, submimetype = mimetype_submimetype.split('/')
@@ -78,20 +85,70 @@ class AlbumReader:
                 return mimetype
         return 'UNKNOWN'
 
+    @overload
     @staticmethod
-    def _read_image(arg, ret_fname: bool = False, tag: str = 'item', media_type: str = 'image', **stat) -> ET.Element:
+    def _read_image(
+        arg: str,
+        ret_fname: Literal[False] = False,
+        tag: str = 'item',
+        media_type: str = 'image',
+        **stat: str
+    ) -> ET.Element:
+        ...
+
+    @overload
+    @staticmethod
+    def _read_image(
+        arg: str,
+        ret_fname: Literal[True] = True,
+        tag: str = 'item',
+        media_type: str = 'image',
+        **stat: str
+    ) -> str:
+        ...
+
+    @staticmethod
+    def _read_image(
+        arg: str,
+        ret_fname: bool = False,
+        tag: str = 'item',
+        media_type: str = 'image',
+        **stat: str
+    ) -> ET.Element | str:
         if ret_fname:
             return arg
-        return ET.Element(tag, path=arg, media_type=media_type, **stat)
+        return ET.Element(tag, path=arg, media_type=media_type, attrib={}, **stat)
+
+    @overload
+    @staticmethod
+    def _read_dir(
+        arg: str,
+        skip_albumfile: bool = False,
+        ret_fname: Literal[False] = False,
+        softlink_albumfile: bool = False,
+        chapters: Sequence[str] | None = None
+    ) -> Iterator[ET.Element]:
+        ...
+
+    @overload
+    @staticmethod
+    def _read_dir(
+        arg: str,
+        skip_albumfile: bool = False,
+        ret_fname: Literal[True] = True,
+        softlink_albumfile: bool = False,
+        chapters: Sequence[str] | None = None
+    ) -> Iterator[str]:
+        ...
 
     @staticmethod
     def _read_dir(
-        arg,
+        arg: str,
         skip_albumfile: bool = False,
         ret_fname: bool = False,
         softlink_albumfile: bool = False,
         chapters: Sequence[str] | None = None
-        ):
+    ) -> Iterator[ET.Element | str]:
         logger.info('Start loading files in directory...')
         for root, _, files in os.walk(arg):
             index = os.path.join(root, 'pictures.album')
@@ -115,7 +172,9 @@ class AlbumReader:
         logger.info('End loading files in directory...')
 
     @staticmethod
-    def _read_xml(arg: str, repeat: bool = False, chapters: Optional[Sequence[str]] = None):
+    def _read_xml(
+        arg: str, repeat: bool = False, chapters: Optional[Sequence[str]] = None
+    ) -> Iterator[ET.Element]:
         logger.info('Start loading files in album...')
         directory = os.path.dirname(arg)
         t = ET.parse(arg)
@@ -159,7 +218,7 @@ class AlbumReader:
     def _get_album_and_directory(
         album: ET.Element | str,
         directory: str = ''
-        ) -> tuple[ET.Element, str]:
+    ) -> tuple[ET.Element, str]:
         if isinstance(album, str):
             if os.path.isdir(album):
                 directory = album
@@ -173,18 +232,18 @@ class AlbumReader:
 
     @staticmethod
     def _get_items_of_tag(
-        id: str,
+        id: Optional[str],
         album: ET.Element,
         directory: str = '',
         tag: str = 'chapter',
         root: str = '.'
-        ) -> list[ET.Element]:
+    ) -> list[ET.Element] | ET.Element | None:
         '''
         If id is None, return all elements with the tag.
         Otherwise, return the element with the id along with the tag.
         '''
         album = AlbumReader._get_album(album, directory)
-        if id:
+        if id is not None:
             pat = f'{root}/{tag}[@id="{id}"]'
             chapters = album.find(pat)
         else:
@@ -199,13 +258,15 @@ class AlbumReader:
         directory: str = '',
         default: str = '',
         tag: str = 'chapter'
-        ) -> Iterable[ET.Element]:
+    ) -> Iterable[ET.Element]:
         album, directory = AlbumReader._get_album_and_directory(album, directory)
         chapter = AlbumReader._get_items_of_tag(id, album, directory, tag) if id else default
         yield from AlbumReader._read_chapter(chapter, directory, album)
 
     @staticmethod
-    def _read_chapter(chapter: ET.Element, directory: str = '', album: Optional[ET.Element] = None):
+    def _read_chapter(
+        chapter: ET.Element, directory: str = '', album: Optional[ET.Element] = None
+    ) -> Iterator[ET.Element]:
         for el in chapter:
             if el.tag == 'f':
                 logger.info('Reading files from a file block inside ["{}"]'.format(chapter.get('id', '')))
@@ -221,7 +282,9 @@ class AlbumReader:
                 yield el
 
     @staticmethod
-    def _read_text(arg: str, directory: str, archive: Optional[Path | str] = None):
+    def _read_text(
+        arg: str, directory: str, archive: Optional[Path | str] = None
+    ) -> Iterator[ET.Element]:
         file_reader = FileReader(archive)
         for l in map(str.strip, arg.splitlines()):
             if l:
@@ -232,12 +295,12 @@ class AlbumReader:
                         l = os.path.join(directory, l)
                     if os.path.isdir(l):
                         l = file_reader.read(l)
-                        yield from AlbumReader._read_dir(l)
+                        yield from AlbumReader._read_dir(l, ret_fname=False)
                     else:
-                        stat = {}
+                        stat: dict[str, str] = {}
                         if l.endswith(']'):
                             path, _stat = l.rsplit(' [', 1)
-                            stat = eval('dict({})'.format(_stat[:-1]))
+                            stat = eval(f'dict({_stat[:-1]})')
                         else:
                             path = l
                         media_type = AlbumReader._get_media_type(path)
@@ -246,7 +309,9 @@ class AlbumReader:
         file_reader.close()
 
     @staticmethod
-    def _generator(iterable, repeat: bool = True, chapters: Optional[str] = None):
+    def _generator(
+        iterable: Iterable[str], repeat: bool = True, chapters: Optional[str] = None
+    ) -> Iterator[ET.Element]:
         # print(chapters)
         for arg in iterable:
             mime = AlbumReader._get_media_type(arg)
@@ -259,10 +324,10 @@ class AlbumReader:
             else:
                 raise IOError(f'TYPE UNKNOWN: {arg}')
 
-    def next(self):
+    def next(self) -> ET.Element:
         return next(self._iterator)
 
-    def __next__(self):
+    def __next__(self) -> ET.Element:
         return self.next()
 
     @staticmethod
@@ -277,7 +342,7 @@ class AlbumReader:
         maker: Optional[Path | str] = None,
         maker_options: dict = {},
         aspect: Optional[tuple[int, int]] = None
-    ):
+    ) -> None:
         t = """<album>
 <head>
 <meta command="showFullScreen()"/>
@@ -294,17 +359,15 @@ class AlbumReader:
 {files}
 </f>
 </chapter>'''
-        # if sorter == 'SSIM':
-        if sorter is not None:
-            from ImageSorter.image_sorter import image_sorted
-            sorter = partial(image_sorted, chunk=None)
         albumf = Path(output if output is not None else path)
         if albumf.is_dir():
             albumf /= ALBUM_FILE
 
         if albumf.exists():
             if do_open_editor:
-                logger.info('Album file "{}" already exists. Opening Album file...'.format(albumf.relative_to('.')))
+                logger.info(
+                    'Album file "{}" already exists. Opening Album file...'.format(albumf.relative_to('.'))
+                )
                 AlbumReader.open_editor(albumf)
                 return
             raise OSError('Album file "{}" already exists.'.format(albumf.relative_to('.')))
@@ -324,29 +387,27 @@ class AlbumReader:
 
         aspect_estimator = AspectEstimator(0.1, default_aspect=aspect)
 
-        def callback(f):
-            f = str(f)
+        def callback(f: str) -> str:
             aspect_estimator.add_sample_aspect(f)
             mime = AlbumReader._get_media_type(f)
             pat = '{}'
             if mime in ('video', 'audio', 'animation'):
                 if repeat_video is not None:
-                    pat = f'{{}} [repeat={repeat_video}]' 
+                    pat = f'{{}} [repeat={repeat_video}]'
             return pat.format(f)
 
-        d = config.process(
-            dataset = map(
-                os.path.relpath,
-                AlbumReader._read_dir(path, True, ret_fname=True, softlink_albumfile=True) if not empty else []
-            ),
-            callback=callback
-            )
+        dataset = AlbumReader._read_dir(str(path), True, ret_fname=True, softlink_albumfile=True) if not empty else []
+        d = config.process(dataset=map(os.path.relpath, dataset), callback=callback)
 
         wd = {
-            'body': '\n'.join([ch.format(id = '', files = '\n'.join(d.pop('@body') if sorter is None else sorter(d.pop('@body'))))]+ [f'<chapter id="{dk}"/>' for dk in d]),
-            'chapters': '\n'.join(ch.format(id = f' id="{dk}"', files = '\n'.join(dv if sorter is None else sorter(dv))) for dk, dv in d.items()),
+            'body': '\n'.join(
+                [ch.format(id='', files='\n'.join(d.pop('@body')))] + [f'<chapter id="{dk}"/>' for dk in d]
+            ),
+            'chapters': '\n'.join(
+                ch.format(id=f' id="{dk}"', files='\n'.join(dv)) for dk, dv in d.items()
+            ),
             'aspect': aspect_estimator.get_aspect_as_str()
-            }
+        }
         # logger.debug(wd)
         with albumf.open('w') as f:
             f.write(t.format(**wd))
@@ -358,7 +419,9 @@ class AlbumReader:
         Config.ConfigWriter.create().write(config_file, pattern)
 
     @staticmethod
-    def _read_config(config_file: Path | str, pattern: Optional[str | Path] = None, do_open_editor: bool = True) -> Config.ConfigReader:
+    def _read_config(
+        config_file: Path | str, pattern: Optional[str | Path] = None, do_open_editor: bool = True
+    ) -> Config.ConfigReader:
         config_file = Path(config_file)
         if not config_file.exists():
             logger.info('Configuration file not exists. Creating now...')
@@ -372,7 +435,7 @@ class AlbumReader:
         return Config.ConfigReader.read(config_file)
 
     @staticmethod
-    def open_editor(path: str, wait: bool = False):
+    def open_editor(path: str | Path, wait: bool = False) -> None:
         editor = os.getenv('EDITOR', '')
         if editor:
             if editor.startswith('subl'):
