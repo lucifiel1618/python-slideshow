@@ -4,10 +4,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import dataclasses
 import functools
 import re
-from typing import Callable, Generic, Iterable, Literal, NamedTuple, Optional, Self, Sequence, TypeAlias, TypeVar
+from typing import Callable, Generic, Iterable, Literal, NamedTuple, Optional, Self, Sequence, TypeAlias, TypeVar, cast
 from .utils import expand_template, get_logger, sampled
-
-from icecream import ic
 
 logger = get_logger('Slideshow.Sorter')
 
@@ -138,8 +136,8 @@ class SimilarImageSorter(Sorter):
 
     def _separated(
         self,
-        datasets: Iterable[Iterable[str]],
-        ditched: Optional[Iterable[Iterable[str]]] = None
+        datasets: StrGroups,
+        ditched: Optional[StrGroups] = None
     ) -> Pair[StrGroups]:
         if ditched is None:
             ditched = StrGroups()
@@ -166,14 +164,14 @@ class GroupedSimilarImageSorter(Sorter):
 
     def _separated(
         self,
-        datasets: Iterable[Iterable[str]],
-        ditched: Iterable[Iterable[str]] | None = None
+        datasets: StrGroups,
+        ditched: Optional[StrGroups] = None
     ) -> Pair[StrGroups]:
 
-        out_pair = Pair(
-            kept := StrGroups(),
-            ditched := StrGroups() if ditched is None else StrGroups(map(StrGroup, ditched))
-        )
+        kept = StrGroups()
+        if ditched is None:
+            ditched = StrGroups()
+        out_pair = Pair(kept, ditched)
 
         for i, group_a in enumerate(datasets):
             if group_a in kept:
@@ -196,11 +194,59 @@ class GroupedSimilarImageSorter(Sorter):
         return out_pair
 
 
+class RegexSorterCoef(NamedTuple):
+    patterns: Optional[tuple[str | Sequence[str], ...]] = None
+    keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None
+    ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None
+    key_fmt: Optional[str] = None
+
+    def updated(self, p: Self) -> Self:
+        if (patterns := self.patterns) is None:
+            patterns = p.patterns
+        else:
+            assert p.patterns is not None
+            assert all(self.status(pattern) == 'independent' for pattern in p.patterns)
+            pattern_list = []
+            for pattern in patterns:
+                for pattern_p in p.patterns:
+                    match self.status(pattern):
+                        case 'copy':
+                            assert isinstance(pattern_p, str)
+                            pattern_list.append(pattern_p)
+                        case 'dependent':
+                            assert isinstance(pattern_p, str)
+                            pattern_list.append(expand_template(pattern_p, cast(Sequence[str], pattern)))
+                        case 'independent':
+                            pattern_list.append(pattern)
+                            break
+            patterns = tuple(pattern_list)
+
+        if (keep := self.keep) is None:
+            keep = p.keep
+        if (ditch := self.ditch) is None:
+            ditch = p.ditch
+        if (key_fmt := self.key_fmt) is None:
+            key_fmt = p.key_fmt
+        return type(self)(patterns, keep, ditch, key_fmt)
+
+    def updated_by(self, c: Self) -> Self:
+        return c.updated(self)
+
+    @staticmethod
+    def status(pattern: Optional[str | Sequence[str]]) -> Literal['independent', 'dependent', 'copy']:
+        if pattern is None:
+            return 'copy'
+        elif isinstance(pattern, str):
+            return 'independent'
+        return 'dependent'
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class RegexSorter(Sorter):
-    pattern: re.Pattern[str]
+    patterns: tuple[re.Pattern[str], ...]
     keep: Sequence[Optional[tuple[str, ...]]]
     ditch: Sequence[Optional[tuple[str, ...]]]
+    key_fmt: Optional[str]
     _whitelist_only: bool = dataclasses.field(repr=False)
     _match_only: bool = dataclasses.field(repr=False)
     keep_all: bool = dataclasses.field(repr=False)
@@ -208,22 +254,26 @@ class RegexSorter(Sorter):
     @classmethod
     def create(
         cls,
-        pattern: re.Pattern[str] | str,
+        patterns: Iterable[re.Pattern[str] | str],
         keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None,
         ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None,
+        key_fmt: Optional[str] = None,
         tokens: Optional[Sequence[re.Pattern[str] | str]] = None
     ) -> Self:
 
-        if tokens is not None:
-            if not isinstance(pattern, str):
-                pattern = pattern.pattern
-            pattern = re.compile(
-                expand_template(
-                    pattern, (t if isinstance(t, str) else t.pattern for t in tokens)
+        pattern_list: list[re.Pattern[str]] = []
+        for pattern in patterns:
+            if tokens is not None:
+                if not isinstance(pattern, str):
+                    pattern = pattern.pattern
+                pattern = re.compile(
+                    expand_template(
+                        pattern, (t if isinstance(t, str) else t.pattern for t in tokens)
+                    )
                 )
-            )
-        elif isinstance(pattern, str):
-            pattern = re.compile(pattern)
+            elif isinstance(pattern, str):
+                pattern = re.compile(pattern)
+            pattern_list.append(pattern)
 
         keep = (None,) if keep is None else tuple(tuple(en) if en is not None else None for en in keep)
         ditch = (None,) if ditch is None else tuple(tuple(en) if en is not None else None for en in ditch)
@@ -232,32 +282,38 @@ class RegexSorter(Sorter):
         match_only = any(en is None for en in ditch)
         keep_all = not ditch
 
-        return cls(pattern, keep, ditch, whitelist_only, match_only, keep_all)
+        return cls(tuple(pattern_list), keep, ditch, key_fmt, whitelist_only, match_only, keep_all)
 
     def _key(self, item: str) -> tuple[str, ...] | Literal['ditch']:
-        m = self.pattern.fullmatch(item)
-        if m is not None:
-            k = m.groups()
-            if self._whitelist_only and k not in self.keep:
-                k = 'ditch'
-            elif k in self.ditch:
-                k = 'ditch'
-            logger.debug(f'⭕ {self.pattern}: {item} << token: {k}')
-        else:
-
-            if self._whitelist_only:
-                k = 'ditch'
-            elif self._match_only:
-                k = 'ditch'
+        k = 'ditch'
+        for pattern in self.patterns:
+            m = pattern.fullmatch(item)
+            if m is not None:
+                k = m.groups()
+                if self._whitelist_only and k not in self.keep:
+                    k = 'ditch'
+                elif k in self.ditch:
+                    k = 'ditch'
             else:
-                k = ()
-            logger.debug(f'❌ {self.pattern}: {item} << token: {k}')
+                if self._whitelist_only:
+                    k = 'ditch'
+                elif self._match_only:
+                    k = 'ditch'
+                else:
+                    k = ()
+            if (self.key_fmt is not None) and (k not in ((), 'ditch')):
+                k = (self.key_fmt.format(*k),)
+            if k != 'ditch':
+                log_str = '' if k == () else f' <<< token: {k}'
+                logger.debug(f'⭕ {pattern}: {item}{log_str}')
+                break
+            logger.debug(f'❌ {pattern}: {item}')
         return k
 
     def _separated(
         self,
-        datasets: Iterable[Iterable[str]],
-        ditched: Optional[Iterable[Iterable[str]]] = None
+        datasets: StrGroups,
+        ditched: Optional[StrGroups] = None
     ) -> Pair[StrGroups]:
         kept = []
         if ditched is None:
@@ -269,6 +325,7 @@ class RegexSorter(Sorter):
 
             if 'ditch' in groups:
                 ditched[0].extend(groups.pop('ditch'))
+
             for k in self.keep:
                 if k is not None:
                     if k in groups:
@@ -290,23 +347,16 @@ class SorterChain:
 
     def _separated(
         self,
-        datasets: Iterable[Iterable[str]],
-        ditched: Optional[Iterable[Iterable[str]]] = None,
+        datasets: StrGroups,
+        ditched: Optional[StrGroups] = None,
         *,
         start: int = 0,
         end: Optional[int] = None
     ) -> Pair[StrGroups]:
-        if end is None:
-            end = len(self.sorters)
-
+        for sorter in self.sorters[start:end]:
+            datasets, ditched = sorter._separated(datasets, ditched)
         if ditched is None:
-            ditched = StrGroups([StrGroup()])
-        if indices := range(start, end):
-            for i in indices:
-                datasets, ditched = self.sorters[i]._separated(datasets, ditched)
-        else:
-            datasets = StrGroups(map(StrGroup, datasets))
-            ditched = StrGroups(map(StrGroup, ditched))
+            ditched = StrGroups()
         return Pair(datasets, ditched)
 
     def _separated_async(
@@ -318,10 +368,8 @@ class SorterChain:
         end: Optional[int] = None
     ) -> FuturePair[StrGroups]:
         fts_out = fts_in
-        if end is None:
-            end = len(self.sorters)
-        for i in range(start, end):
-            fts_out = self.sorters[i]._separated_async(fts_out, executor=executor)
+        for sorter in self.sorters[start:end]:
+            fts_out = sorter._separated_async(fts_out, executor=executor)
         return fts_out
 
     def separated(
@@ -331,7 +379,9 @@ class SorterChain:
         start: int = 0,
         end: Optional[int] = None
     ) -> Pair[StrGroup]:
-        pair_in = self._separated((dataset,), start=start, end=end)
+        pair_in = self._separated(
+            StrGroups([StrGroup(dataset)]), start=start, end=end
+        )
         pair_out = Pair(StrGroup(), StrGroup())
         for k in pair_in.k:
             pair_out.k.extend(k)
@@ -347,24 +397,3 @@ class SorterChain:
         end: Optional[int] = None
     ) -> StrGroup:
         return self.separated(dataset, start=start, end=end).k
-
-
-class RegexSorterConfig(NamedTuple):
-    pattern: Optional[str | Sequence[str]] = None
-    keep: Optional[Sequence[Optional[tuple[str]]]] = None
-    ditch: Optional[Sequence[Optional[tuple[str]]]] = None
-
-    def updated(self, p: Self) -> Self:
-        pattern = self.pattern
-        if pattern is None:
-            pattern = p.pattern
-        elif isinstance(pattern, Sequence):
-            assert isinstance(p.pattern, str)
-            pattern = expand_template(p.pattern, pattern)
-        keep = self.keep
-        if keep is None:
-            keep = p.keep
-        ditch = self.ditch
-        if ditch is None:
-            ditch = p.ditch
-        return type(self)(pattern, keep, ditch)

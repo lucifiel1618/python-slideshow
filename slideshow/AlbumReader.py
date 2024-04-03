@@ -2,7 +2,6 @@ import os
 from xml.etree import ElementTree as ET
 from itertools import cycle, chain
 from pathlib import Path
-from functools import partial, singledispatch, singledispatchmethod
 from zipfile import ZipFile
 import tempfile
 import mimetypes
@@ -52,7 +51,7 @@ class AlbumReader:
         self,
         *iterable: str,
         repeat: bool = True,
-        chapters: Optional[str] = None
+        chapters: Optional[Sequence[str]] = None
     ):
         self._iterator: Iterator[ET.Element] = self._generator(iterable, repeat=repeat, chapters=chapters)
         self.repeat_video: int = 3
@@ -115,6 +114,7 @@ class AlbumReader:
         media_type: str = 'image',
         **stat: str
     ) -> ET.Element | str:
+        logger.detail(f'Reading media file: `{arg}`')
         if ret_fname:
             return arg
         return ET.Element(tag, path=arg, media_type=media_type, attrib={}, **stat)
@@ -126,7 +126,7 @@ class AlbumReader:
         skip_albumfile: bool = False,
         ret_fname: Literal[False] = False,
         softlink_albumfile: bool = False,
-        chapters: Sequence[str] | None = None
+        chapters: Optional[Sequence[str]] = None
     ) -> Iterator[ET.Element]:
         ...
 
@@ -137,7 +137,7 @@ class AlbumReader:
         skip_albumfile: bool = False,
         ret_fname: Literal[True] = True,
         softlink_albumfile: bool = False,
-        chapters: Sequence[str] | None = None
+        chapters: Optional[Sequence[str]] = None
     ) -> Iterator[str]:
         ...
 
@@ -147,7 +147,7 @@ class AlbumReader:
         skip_albumfile: bool = False,
         ret_fname: bool = False,
         softlink_albumfile: bool = False,
-        chapters: Sequence[str] | None = None
+        chapters: Optional[Sequence[str]] = None
     ) -> Iterator[ET.Element | str]:
         logger.info('Start loading files in directory...')
         for root, _, files in os.walk(arg):
@@ -310,7 +310,7 @@ class AlbumReader:
 
     @staticmethod
     def _generator(
-        iterable: Iterable[str], repeat: bool = True, chapters: Optional[str] = None
+        iterable: Iterable[str], repeat: bool = True, chapters: Optional[Sequence[str]] = None
     ) -> Iterator[ET.Element]:
         # print(chapters)
         for arg in iterable:
@@ -382,7 +382,7 @@ class AlbumReader:
                 maker = Path(albumf.parent) / CONFIG_FILE
             config = config.combined(AlbumReader._read_config(maker, **maker_options))
 
-        for m in config.header.elements[0].meta:
+        for m in config.header.meta:
             exec(m)
 
         aspect_estimator = AspectEstimator(0.1, default_aspect=aspect)

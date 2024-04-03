@@ -24,9 +24,12 @@ def _ffmpeg_read(
     rate: float,
     size: tuple[int, int],
     fps: Optional[int] = 30,
-    parent: Optional[object] = None
-    ):
+    parent: Optional[object] = None,
+    max_streams: int = 100,  # 200,
+    dryrun: bool = False
+) -> None:
     ffmpeg_object = FFMPEGObject.FFMPEGObjectOutput(delay, size, fps, rate)
+    ffmpeg_object.dryrun = dryrun
     with tempfile.TemporaryDirectory() as tempd:
         tempd_path = Path(tempd)
         temp_output = tempd_path / output.name
@@ -38,7 +41,7 @@ def _ffmpeg_read(
                     exec(f'parent.{media.get("command")}', {'parent': parent})
                 continue
             ffmpeg_object.add_stream(media)
-            if len(ffmpeg_object.streams) >= 220:
+            if len(ffmpeg_object.streams) >= max_streams:
                 subfile = temp_output.with_suffix(f'.part{len(subfiles)+1}{temp_output.suffix}')
                 ffmpeg_object.run(subfile)
                 subfiles.append(str(subfile))
@@ -55,10 +58,13 @@ def _ffmpeg_read(
 
         subfiles_list = tempd_path / 'inputs.txt'
         subfiles_list.write_text('\n'.join(f"file '{f}'" for f in subfiles))
-        outstream = (ffmpeg.input(str(subfiles_list), format='concat', safe=0)
-                           .output(str(temp_output), codec='copy')
-                    )
-
+        outstream = (
+            ffmpeg.input(str(subfiles_list), format='concat', safe=0)
+                  .output(str(temp_output), codec='copy')
+        )
+        if dryrun:
+            ffmpeg_object.print_stream_cmd(outstream)
+            return
         outstream.run()
         shutil.move(temp_output, output)
 
@@ -74,13 +80,14 @@ class App(object):
         aspect: str = '16X9',
         chapters: Optional[Sequence[str]] = None,
         qsize: None = None  # Preserved argument
-        ):
+    ):
         self.set_size(width, height, aspect)
         # _gcd = gcd(width, height)
         self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*image_files, repeat=False, chapters=chapters)
         self.rate: float = rate
         self.delay: int = delay
         self.fps: int = 30  # None
+        self.dryrun = False
         for meta in self.album.preprocess_meta():
             print(f'App.{meta.get("command")}')
             exec(f'self.{meta.get("command")}')
@@ -90,6 +97,8 @@ class App(object):
             match aspect:
                 case '4X3':
                     width, height = 1024, 768
+                case '3X4':
+                    width, height = 768, 1024
                 case '16X9':
                     width, height = 1280, 720
                 case '9X16':
@@ -108,11 +117,13 @@ class App(object):
                 width = height / aspect_ratio
         self.size: tuple[int, int] = (width, height)
 
-    def show_slides(self, output: Optional[Path]):
+    def show_slides(self, output: Optional[Path], dryrun: Optional[bool] = None):
         if output is None:
             self.inputbox()
             output = Path(self._output)
-        _ffmpeg_read(output, iter(self.album), self.delay, self.rate, self.size, self.fps)
+        if dryrun is None:
+            dryrun = self.dryrun
+        _ffmpeg_read(output, iter(self.album), self.delay, self.rate, self.size, self.fps, dryrun=dryrun)
 
     def change_playspeed(self, rate: float):
         self.rate = rate

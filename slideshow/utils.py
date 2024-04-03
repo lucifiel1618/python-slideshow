@@ -1,4 +1,4 @@
-from __future__ import annotations
+from pathlib import Path
 from PIL import Image
 import logging
 import random
@@ -6,44 +6,117 @@ from collections import Counter
 import math
 import ffmpeg
 import multiprocessing as mp
-from typing import Callable, Iterable, Optional, Sequence, TypeVar
+from typing import Callable, Iterable, Literal, Optional, Sequence, TypeVar
 import functools
 
 import re
 
 LOG_LEVEL = 'DEBUG'
+FFMPEG_LOGLEVEL = 'debug'
 COLOR_LOG = True
 
 T = TypeVar('T')
 
 
-def get_logger(name, color=None):
+def addLoggingLevel(levelName, levelNum, methodName=None):
+    """
+    Comprehensively adds a new logging level to the `logging` module and the
+    currently configured logging class.
+
+    `levelName` becomes an attribute of the `logging` module with the value
+    `levelNum`. `methodName` becomes a convenience method for both `logging`
+    itself and the class returned by `logging.getLoggerClass()` (usually just
+    `logging.Logger`). If `methodName` is not specified, `levelName.lower()` is
+    used.
+
+    To avoid accidental clobberings of existing attributes, this method will
+    raise an `AttributeError` if the level name is already an attribute of the
+    `logging` module or if the method name is already present 
+
+    Example
+    -------
+    >>> addLoggingLevel('TRACE', logging.DEBUG - 5)
+    >>> logging.getLogger(__name__).setLevel("TRACE")
+    >>> logging.getLogger(__name__).trace('that worked')
+    >>> logging.trace('so did this')
+    >>> logging.TRACE
+    5
+
+    """
+    if not methodName:
+        methodName = levelName.lower()
+
+    if hasattr(logging, levelName):
+        raise AttributeError(f'{levelName} already defined in logging module')
+    if hasattr(logging, methodName):
+        raise AttributeError(f'{methodName} already defined in logging module')
+    if hasattr(logging.getLoggerClass(), methodName):
+        raise AttributeError(f'{methodName} already defined in logger class')
+
+    # This method was inspired by the answers to Stack Overflow post
+    # http://stackoverflow.com/q/2183233/2988730, especially
+    # http://stackoverflow.com/a/13638084/2988730
+    def logForLevel(self, message, *args, **kwargs):
+        if self.isEnabledFor(levelNum):
+            self._log(levelNum, message, args, **kwargs)
+
+    def logToRoot(message, *args, **kwargs):
+        logging.log(levelNum, message, *args, **kwargs)
+
+    logging.addLevelName(levelNum, levelName)
+    setattr(logging, levelName, levelNum)
+    setattr(logging.getLoggerClass(), methodName, logForLevel)
+    setattr(logging, methodName, logToRoot)
+
+
+addLoggingLevel('DETAIL', logging.DEBUG - 5)
+
+
+def get_logger(
+        name: str, color: Optional[bool] = None,
+        to_stream: bool = True,
+        to_file: bool | Path | str = False
+) -> logging.Logger:
     if color is None:
         color = COLOR_LOG
+    has_colorlogs = True
     if color:
         try:
             import coloredlogs
             from humanfriendly.terminal import terminal_supports_colors
         except ModuleNotFoundError:
-            color = False
-            logger.info('coloredlogs not installed. colored logging will not be populated.')
-
-    fmt = {
-        'fmt': '{asctime} {name} {levelname} {message}',
-        'datefmt': '%H:%M:%S',
-        'style': '{'
-    }
+            has_colorlogs = False
+    if has_colorlogs:
+        fmt = {
+            'fmt': '{asctime} {name} {levelname} {message}',
+            'datefmt': '%H:%M:%S',
+            'style': '{'
+        }
+    else:
+        fmt = {
+            'format': '%(asctime)s %(name)s %(levelname)s %(message)s',
+            'datefmt': '%H:%M:%S'
+        }
     logger = logging.getLogger(name)
     if logger.hasHandlers():
         return logger
-    handler = logging.StreamHandler()
-    logger.addHandler(handler)
+    handlers: list[logging.Handler] = []
+    if to_stream:
+        handlers.append(logging.StreamHandler())
+    if to_file is not False:
+        if to_file is True:
+            logger_path = Path('./slideshow.log')
+        else:
+            logger_path = Path(to_file)
+        handlers.append(logging.FileHandler(logger_path))
 
-    formatter = (coloredlogs.ColoredFormatter if color and terminal_supports_colors() else logging.Formatter)(**fmt)
-
-    handler.setFormatter(formatter)
+    for handler in handlers:
+        logger.addHandler(handler)
+        formatter = (coloredlogs.ColoredFormatter if color and terminal_supports_colors() else logging.Formatter)(**fmt)
+        handler.setFormatter(formatter)
     logger.setLevel(getattr(logging, LOG_LEVEL))
-
+    if color is True and not has_colorlogs:
+        logger.info('coloredlogs not installed. uncolored logging will not be populated.')
     return logger
 
 
@@ -73,45 +146,48 @@ def rescaled(image, size, result, i=0, fmt=None):
 class AspectEstimator:
     def __init__(self, prop: float = 0.1, default_aspect: Optional[tuple[int, int] | str] = None):
         self.logger = get_logger('AspectEstimator')
-        self._aspect: Optional[tuple[int, int] | str] = default_aspect
+        self._aspect: Optional[tuple[int, int] | Literal['auto']] = default_aspect
+        self._prop: float
+        self._add_sample_aspect: Callable[[mp.Queue[tuple[int, int]], str], None]
         self.set_prop(prop)
+
+        self._pool: mp.pool.Pool
+        self._manager: mp.managers.SyncManager
+        self._result_queue: mp.Queue[tuple[int, int]]
         if self._prop != 0:
-            self._pool: mp.pool.Pool = mp.Pool()
-            self._manager: mp.managers.SyncManager = mp.Manager()
-            self._result_queue: mp.Queue[tuple[int, int]] = self._manager.Queue()
-            # self._result_queue: mp.Queue[tuple[int, int]] = mp.Queue()
+            self._pool = mp.Pool()
+            self._manager = mp.Manager()
+            self._result_queue = self._manager.Queue()
 
     @property
     def prop(self) -> float:
         return self._prop
 
     def set_prop(self, prop: float):
-        self._prop: float = 0. if self._aspect is not None else prop
+        self._prop = 0. if self._aspect is not None else prop
         if self._prop == 1.:
             add_sample_aspect = self._add_sample_aspect_all
         elif self._prop == 0:
             add_sample_aspect = self._add_sample_aspect_empty
         else:
             add_sample_aspect = functools.partial(self._add_sample_aspect_prop, prop=self._prop)
-        self._add_sample_aspect: Callable[[mp.Queue[tuple[int, int]], str], None] = add_sample_aspect
+        self._add_sample_aspect = add_sample_aspect
 
     def add_sample_aspect(self, sample: str):
         self._pool.apply_async(self._add_sample_aspect, (self._result_queue, sample))
 
     @staticmethod
-    def _add_sample_aspect_empty(queue: mp.Queue[tuple[int, int]], sample: str):
-        return
+    def _add_sample_aspect_empty(queue: mp.Queue[tuple[int, int]], sample: str) -> None:
+        ...
 
     @staticmethod
-    def _add_sample_aspect_prop(queue: mp.Queue[tuple[int, int]], sample: str, prop: float):
+    def _add_sample_aspect_prop(queue: mp.Queue[tuple[int, int]], sample: str, prop: float) -> None:
         if random.random() > prop:
             return
-        aspect = AspectEstimator.get_sample_aspect(sample)
-        if aspect is not None:
-            queue.put(aspect)
+        AspectEstimator._add_sample_aspect_all(queue, sample)
 
     @staticmethod
-    def _add_sample_aspect_all(queue: mp.Queue[tuple[int, int]], sample: str):
+    def _add_sample_aspect_all(queue: mp.Queue[tuple[int, int]], sample: str) -> None:
         aspect = AspectEstimator.get_sample_aspect(sample)
         if aspect is not None:
             queue.put(aspect)
@@ -129,7 +205,7 @@ class AspectEstimator:
                 return (w // d, h // d)
         return None
 
-    def get_aspect(self) -> tuple[int, int] | str:
+    def get_aspect(self) -> tuple[int, int] | Literal['auto']:
         if self._aspect is None:
             self._pool.close()
             self._pool.join()
@@ -156,7 +232,7 @@ class AspectEstimator:
         return aspect
 
 
-def flatten(t: list, inplace: bool = False) -> list:
+def flatten(t: list[T], inplace: bool = False) -> list[T]:
     flat_list = []
     for sublist in t:
         for item in sublist:
@@ -195,14 +271,15 @@ def expand_template(
 ) -> str:
     r = _Replacement(replacements)
     template = re._parser.parse_template(template, r)
-    expanded = re._parser.expand_template(template, r)
+    expanded = ''.join(r.group(part) if isinstance(part, int) else part for part in template)
+    # expanded = re._parser.expand_template(template, r)
     return expanded
 
 
-def sampled(dataset: Sequence[T], sample_size: int = 3) -> Sequence[T]:
+def sampled(dataset: Sequence[T], sample_size: int = 3) -> list[T]:
     n = len(dataset)
     if sample_size >= n:
-        return dataset
+        return list(dataset)
     step_size = n / sample_size
     result = [dataset[0], *(dataset[int(i * step_size)] for i in range(1, sample_size))]
     return result

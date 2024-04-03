@@ -1,3 +1,4 @@
+from fractions import Fraction
 from multiprocessing.pool import AsyncResult
 import sys
 from pathlib import Path
@@ -5,14 +6,14 @@ from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 import multiprocessing
 import queue
-from typing import Iterable, Callable, Optional, TypedDict
+from typing import Iterable, Callable, Literal, NoReturn, Optional, Self, TypedDict, cast, Sequence
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QLabel, QGraphicsOpacityEffect, QWidget, QHBoxLayout, QFrame
 from PyQt6.QtCore import (
     QTimer, Qt, QThread, pyqtSignal, pyqtSlot, QPropertyAnimation, QObject, QEvent, QUrl, QFileInfo,
     QTemporaryDir, QMutex
-    )
+)
 from PyQt6.QtGui import QFont
 
 import vlc
@@ -22,6 +23,26 @@ from . import FFMPEGObject
 from . import utils
 
 logger = utils.get_logger('SlideShow.GUIPyQt6FFMPEG')
+
+
+class Application:
+    def __init__(self, qapp: Optional[QApplication] = None):
+        if qapp is None:
+            qapp = QApplication([])
+        self.qapp = qapp
+        self.ret_code: int = 0
+
+    def exec(self) -> None:
+        self.ret_code = self.qapp.exec()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, type, value, traceback) -> NoReturn:
+        sys.exit(self.ret_code)
+
+    def quit(self):
+        self.qapp.quit()
 
 
 class VLCMediaPlayer(QObject):
@@ -40,58 +61,61 @@ class VLCMediaPlayer(QObject):
         # self._timer.timeout.connect(self.update_mediaStatusChanged)
         self.event_manager = self._player.event_manager()
         self.event_manager.event_attach(
-            vlc.EventType.MediaPlayerEndReached,
+            vlc.EventType.MediaPlayerEndReached,  # type: ignore
             lambda e: self.mediaStatusChanged.emit(self.MediaStatus.EndOfMedia)
-            )
+        )
 
-    def setVideoOutput(self, video_widget):
+    def setVideoOutput(self, video_widget) -> None:
         if sys.platform.startswith('linux'):  # for Linux using the X Server
-            self._player.set_xwindow(self.video_widget.winId())
+            self._player.set_xwindow(self.video_widget.winId())  # type: ignore
         elif sys.platform == "win32":  # for Windows
             self._player.set_hwnd(self.video_widget.winId())
         elif sys.platform == "darwin":  # for MacOS
             self._player.set_nsobject(int(video_widget.winId()))
 
-    def setSource(self, media):
+    def setSource(self, media) -> None:
         self.media = self._instance.media_new(media.url())
         self._player.set_media(self.media)
         # self._player.play()
         self._player.pause()
 
-    def play(self):
+    def play(self) -> None:
         self._player.play()
         self._timer.start()
         self._is_playing = True
 
-    def setPlaybackRate(self, v):
+    def setPlaybackRate(self, v) -> None:
         self._player.set_rate(v)
 
-    def update_mediaStatusChanged(self):
+    def update_mediaStatusChanged(self) -> None:
         is_playing = self._player.is_playing()
         if is_playing != self._is_playing:
             self._is_playing = is_playing
             self.mediaStatusChanged.emit(self.MediaStatus.OtherStatus if is_playing else self.MediaStatus.EndOfMedia)
 
 
-def process_meta(command):
+def process_meta(command: str) -> FFMPEGObject.VideoMeta:
     return {'tag': 'meta', 'content': command}
 
 
 def _ffmpeg_read(
-    queue: queue.Queue[AsyncResult],
+    queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]],
     iterable: Iterable[ET.Element],
     delay: float,
     size: tuple[int, int],
     dpath: str,
     segment_time: int = 10,
-    log_level: Optional[str] = None
+    loglevel: Optional[FFMPEGObject.LogLevel] = None
 ) -> None:
     # with multiprocessing.Pool(None, limit_cpu) as pool:
     with multiprocessing.Pool(multiprocessing.cpu_count() - 1) as pool:
-        ffmpeg_object = FFMPEGObject.FFMPEGObjectLive(delay, size, log_level=log_level)
+        logger.debug('Submmiting jobs to media processing queue...')
+        ffmpeg_object = FFMPEGObject.FFMPEGObjectLive(delay, size, loglevel=loglevel)
         index = 0
         skipped = 0
+        logger.debug('Iterating over files...')
         for media in iterable:
+            logger.detail(f'Processing {media}...')
             if media.tag == 'meta':
                 queue.put_nowait(pool.apply_async(process_meta, (media.get('command'),)))
                 skipped += 1
@@ -105,19 +129,23 @@ def _ffmpeg_read(
                 else:
                     qput = queue.put
                     fname = f'{dpath}/{index:0>4}.ts'
-                qput(pool.apply_async(ffmpeg_object.compile_call(fname)))
+                logger.detail(f'Queuing `{fname}`')
+                qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
                 ffmpeg_object.reset()
                 index += 1
+            logger.detail(f'End processing {media}...')
         if ffmpeg_object.streams:
             if skipped > 0:
                 qput = queue.put_nowait
                 skipped -= 1
             else:
                 qput = queue.put
-            qput(pool.apply_async(ffmpeg_object.compile_call(fname)))
+            qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
         pool.close()
+        logger.debug('Submmiting jobs to media processing queue finished. Waiting for jobs to end...')
         pool.join()
         queue.join()
+        logger.debug('All media processing jobs finished.')
 
 
 class FStat(TypedDict):
@@ -163,76 +191,97 @@ class CleanUpThread(QThread):
 class ReadMediaThread(QThread):
     def __init__(
         self,
-        q: queue.Queue[AsyncResult],
+        q: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]],
         media_objects: Iterable[ET.Element],
         delay: float,
         size: tuple[int, int],
         dpath: str,
-        log_level: Optional[str] = None,
+        loglevel: Optional[FFMPEGObject.LogLevel] = None,
         parent: Optional[QObject] = None
     ):
         super().__init__(parent)
-        self.queue: queue.Queue[AsyncResult] = q
-        self.media_objects: Iterable[ET.Element] = media_objects
-        self.delay: float = delay
-        self.size: tuple[int, int] = size
-        self.dpath: str = dpath
-        self.log_level = log_level
+        self.queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]] = q
+        self.media_objects = media_objects
+        self.delay = delay
+        self.size = size
+        self.dpath = dpath
+        self.loglevel = loglevel
 
     def run(self) -> None:
-        _ffmpeg_read(self.queue, self.media_objects, self.delay, self.size, self.dpath, log_level=self.log_level)
+        logger.debug('Initializing video thread...')
+        _ffmpeg_read(self.queue, self.media_objects, self.delay, self.size, self.dpath, loglevel=self.loglevel)
+        logger.debug('Terminating video thread...')
+
+
+class Resizable(QWidget):
+    resized = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setStyleSheet("background-color:black;")
+
+    def resizeEvent(self, event) -> None:
+        ev = super().resizeEvent(event)
+        self.resized.emit()
+        return ev
 
 
 class StdInfo(QLabel):
     def __init__(
         self,
-        text_func: Callable | str,
+        text_func: Callable[[], str] | str,
         font: QFont = QFont('Arial', 36),
         align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
         animated: bool = True,
-        parent: Optional[QObject] = None,
+        parent: Optional[Resizable] = None,
         **kwds
     ):
         super().__init__(parent, **kwds)
-
         self.setStyleSheet('QLabel {color: gray;}')
         self.setStyleSheet('QLabel {background-color: rgba(0, 0, 0, 50);}')
         self.setFont(font)
-        self.animated: bool = animated
-        self.text_func: Callable | str = text_func
-        self.align: Qt.AlignmentFlag = align
-        self.display: Callable = self.display_func if callable(text_func) else self.display_str
+        self.animated = animated
+        self.text_func = text_func
+        self.align = align
+        self.display = self.display_func if callable(text_func) else self.display_str
         effect = QGraphicsOpacityEffect(self)
-        self.anim: QPropertyAnimation = QPropertyAnimation(effect, b'opacity')
+        self.anim: QPropertyAnimation = QPropertyAnimation(effect, b'opacity')  # type: ignore
         self.setGraphicsEffect(effect)
         self.anim.setDuration(2000)
         self.anim.setStartValue(1.)
         self.anim.setEndValue(0.)
         # self.anim.setEasingCurve(QEasingCurve.OutQuad)
         self.anim.finished.connect(self.hide)
-        self.parent().resized.connect(self.set_position)
+        self.parent().resized.connect(self.set_position)  # type: ignore
 
     @pyqtSlot()
-    def set_position(self, pos=None) -> None:
+    def set_position(self, pos: Optional[tuple[int, int]] = None) -> None:
         if pos is None:
-            coords = self.parent().geometry().getRect()
+            coords: tuple[int, ...] = self.parent().geometry().getRect()  # type: ignore
             if self.align & Qt.AlignmentFlag.AlignLeft:
                 x = 0
-            if self.align & Qt.AlignmentFlag.AlignRight:
+            elif self.align & Qt.AlignmentFlag.AlignRight:
                 x = coords[2] - self.width()
+            elif self.align & Qt.AlignmentFlag.AlignHCenter:
+                x = (coords[2] - self.width()) // 2
+            else:
+                raise ValueError('Inappropriate AlignmentFlag')
+
             if self.align & Qt.AlignmentFlag.AlignTop:
                 y = 0
-            if self.align & Qt.AlignmentFlag.AlignBottom:
+            elif self.align & Qt.AlignmentFlag.AlignBottom:
                 y = coords[3] - self.height()
-            if self.align & Qt.AlignmentFlag.AlignHCenter:
-                x = (coords[2] - self.width()) // 2
-            if self.align & Qt.AlignmentFlag.AlignVCenter:
+            elif self.align & Qt.AlignmentFlag.AlignVCenter:
                 y = (coords[3] - self.height()) // 2
+            else:
+                raise ValueError('Inappropriate AlignmentFlag')
             pos = (x, y)
         self.move(*pos)
 
     def display_func(self, *x) -> None:
-        self.setText(self.text_func(*x))
+        text_func = cast(Callable, self.text_func)
+        self.setText(text_func(*x))
         self.adjustSize()
         self.set_position()
         if self.animated:
@@ -241,7 +290,8 @@ class StdInfo(QLabel):
             self.anim.start()
 
     def display_str(self) -> None:
-        self.setText(self.text_func)
+        text = cast(str, self.text_func)
+        self.setText(text)
         self.adjustSize()
         self.set_position()
         if self.animated:
@@ -251,7 +301,7 @@ class StdInfo(QLabel):
             self.anim.start()
 
 
-class App(QWidget):
+class App(Resizable):
     _changed_playspeed = pyqtSignal()
     _play_now = pyqtSignal(str)
     _keyPressed = pyqtSignal(QEvent)
@@ -262,18 +312,20 @@ class App(QWidget):
         delay: int = 1000,
         rate: float = 1.0,
         qsize: int = 10,
-        parent: Optional[QObject] = None
+        chapters: Optional[Sequence[str]] = None,
+        parent: Optional[QWidget] = None
     ):
         super().__init__(parent)
+
         self.status: bool = True
         self.delay: int = delay
         self.rate: float = rate
-        self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files)
+        self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files, chapters=chapters)
         self.set_size()
         self.maxqsize: int = 10
-        self.queue: queue.Queue[AsyncResult[dict[str, str]]] = queue.Queue(qsize)
+        self.queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]] = queue.Queue(qsize)
         self._tempd = QTemporaryDir()
-        self.destroyed.connect(self._tempd.remove)
+        self.destroyed.connect(self._tempd.remove)  # type: ignore
         self._played: list[str] = []
         self.media_thread: ReadMediaThread = ReadMediaThread(
             self.queue,
@@ -282,7 +334,7 @@ class App(QWidget):
             self.media_size,
             self._tempd.path(),
             parent=self,
-            log_level=utils.LOG_LEVEL
+            loglevel=utils.FFMPEG_LOGLEVEL
         )
         self.destroyed.connect(self.media_thread.terminate)
 
@@ -320,21 +372,37 @@ class App(QWidget):
         self._changed_playspeed.emit()
 
         self.debug_info: StdInfo = StdInfo(
-            lambda x: f'path: {Path(x).relative_to(".") if Path(x).is_relative_to(".") else x:s}',
+            lambda x: f'path: {Path(x).relative_to(".") if Path(x).is_relative_to(".") else x:s}',   # type: ignore
             align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             animated=False,
             font=QFont('Arial', 24),
             parent=self)
-        
-        self.end_info: Optional[StdInfo] = None
+
+        self.loading_info: StdInfo = StdInfo(
+            'Loading...',
+            QFont('Arial', 108),
+            align=Qt.AlignmentFlag.AlignCenter,
+            animated=False,
+            parent=self
+        )
+
+        self.end_info: StdInfo = StdInfo(
+            'End',
+            QFont('Arial', 108),
+            align=Qt.AlignmentFlag.AlignCenter,
+            parent=self
+        )
 
         self._play_now[str].connect(self.debug_info.display)
         self._play_now[str].connect(self.clean_up)
+        self.loading_info.display()
+        self.end_info.hide()
         self.debug_info.hide()
         self.setVisible(True)
         for meta in self.album.preprocess_meta():
-            print(f'App.{meta.get("command")}')
-            exec(f'self.{meta.get("command")}')
+            cmd = meta.get('command')
+            logger.info(f'Executing App.{cmd}')
+            exec(f'self.{cmd}')
 
     def clean_up(self, path) -> None:
         CleanUpThread.flist.append({'path': Path(path), 'size': -1})
@@ -345,6 +413,7 @@ class App(QWidget):
 
     def show_slides(self) -> None:
         t = self.media_thread
+        logger.info('Start playing...')
         t.start()
         self.play_next(True)
 
@@ -393,26 +462,30 @@ class App(QWidget):
     def toggle_debug(self) -> None:
         debug_is_visible = self.debug_info.isVisible()
         self.debug_info.setVisible(not debug_is_visible)
-        if self.end_info is not None:
-            self.end_info.setVisible(not debug_is_visible)
 
     def end_of_media(self, status) -> None:
         if status == self.MediaPlayer.MediaStatus.EndOfMedia:
             self.play_next()
 
     def play_next(self, first: bool = False) -> None:
+        if first:
+            logger.debug('Start pulling files from the media queue...')
+        logger.detail('Accessing media queue for the next file...')
         if first or self.queue.unfinished_tasks > 0:
-            entry: FFMPEGObject.VideoMeta = self.queue.get().get()
+            logger.detail('Waiting for the media processing to finish...')
+            try:
+                timeout = 60
+                entry: FFMPEGObject.VideoMeta = self.queue.get(timeout=timeout).get(timeout=timeout)
+            except queue.Empty as e:
+                e.args = (f'{timeout}s Timeout. Media queue is empty when it shouldn\'t be.', )
+                logger.error(e)
+                raise e
+            logger.detail(f'Next file found `{entry}`...')
             self.queue.task_done()
         else:
+            logger.debug('Empty queue. Exiting gracefully.')
             self.play_pause(False)
-            end_info = StdInfo(
-                'End',
-                QFont('Arial', 108),
-                align=Qt.AlignmentFlag.AlignCenter,
-                parent=self
-            )
-            end_info.display()
+            self.end_info.display()
             return
         content = entry['content']
         if entry['tag'] == 'meta':
@@ -423,9 +496,11 @@ class App(QWidget):
         self._play_now.emit(content)
         url = QUrl.fromLocalFile(QFileInfo(content).absoluteFilePath())
         self.MediaPlayer.setSource(url)
+        if first:
+            self.loading_info.hide()
         self.MediaPlayer.play()
 
-    def change_playspeed(self, speed):
+    def change_playspeed(self, speed) -> None:
         if speed < 0:
             speed = 0
         self.rate = speed
@@ -447,19 +522,15 @@ class App(QWidget):
                     width = 1280
 
         if None in (width, height):
-            aspect = tuple(map(int, aspect.split('X', 1)))
-            aspect_ratio = aspect[0] / aspect[1]
+            aspect_ratio = Fraction(*aspect.split('X', 1))
             if width is not None:
-                height = width * aspect_ratio
+                height = int(width * aspect_ratio)
             else:
-                width = height / aspect_ratio
-        self.media_size: tuple[int, int] = (width, height)
+                width = int(cast(int, height) / aspect_ratio)
+        self.media_size: tuple[int, int] = (cast(int, width), cast(int, height))
 
-    resized = pyqtSignal()
+    def get_ffmpeg_loglevel(self) -> Optional[Literal[FFMPEGObject.LogLevel]]:
+        return self.media_thread.loglevel
 
-    def resizeEvent(self, event) -> None:
-        ev = super().resizeEvent(event)
-        self.resized.emit()
-        # logger.info('size: {}'.format(self.size()))
-        # logger.info('frame size: {}'.format(self.frameSize()))
-        return ev
+    def set_ffmpeg_loglevel(self, value: Optional[FFMPEGObject.LogLevel] = None) -> None:
+        self.media_thread.loglevel = value

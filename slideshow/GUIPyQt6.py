@@ -35,11 +35,13 @@ class QMovieT(QMovie):
     NOT YET COMPLETELY IMPLEMENTED
     '''
     mediaStatusChanged = pyqtSignal(bool)
+
     def __init__(self, *args, **kwds):
         self.repeat = kwds.pop('repeat', 1)
         super(self.__class__, self).__init__(*args, **kwds)
         kwds['repeat'] = self.repeat
         self.times = 0
+
     def gif_frame_changed(self, frame):
         if (frame + 1) >= self.frameCount():
             self.times += 1
@@ -47,11 +49,13 @@ class QMovieT(QMovie):
                 self.stop()
                 self.mediaStatusChanged.emit(False)
 
+
 class VLCMediaPlayer(QObject):
     mediaStatusChanged = pyqtSignal(bool)
     MediaStatus = SimpleNamespace()
     MediaStatus.EndOfMedia = 6
     MediaStatus.OtherStatus = 0
+
     def __init__(self, parent = None):
         super().__init__(parent)
         self._instance = vlc.Instance()
@@ -61,12 +65,13 @@ class VLCMediaPlayer(QObject):
         self._timer.setInterval(200)
         self._is_playing = False
         self._timer.timeout.connect(self.update_mediaStatusChanged)
+
     def setVideoOutput(self, video_widget):
-        if sys.platform.startswith('linux'): # for Linux using the X Server
+        if sys.platform.startswith('linux'):  # for Linux using the X Server
             self._player.set_xwindow(self.video_widget.winId())
-        elif sys.platform == "win32": # for Windows
+        elif sys.platform == "win32":  # for Windows
             self._player.set_hwnd(self.video_widget.winId())
-        elif sys.platform == "darwin": # for MacOS
+        elif sys.platform == "darwin":  # for MacOS
             self._player.set_nsobject(int(video_widget.winId()))
 
     def setSource(self, media):
@@ -78,18 +83,22 @@ class VLCMediaPlayer(QObject):
     #     if not hasattr(self, attr):
     #         print (attr)
     #     return lambda x: None
+
     def play(self):
         self._player.play()
         self._timer.start()
         self.MediaStatus.EndOfMedia = False
         self._is_playing = True
+
     def setPlaybackRate(self, v):
         self._player.set_rate(v)
+
     def update_mediaStatusChanged(self):
         is_playing = self._player.is_playing()
         if is_playing != self._is_playing:
             self._is_playing = is_playing
             self.mediaStatusChanged.emit(self.MediaStatus.OtherStatus if is_playing else self.MediaStatus.EndOfMedia)
+
 
 class StdInfo(QLabel):
     def __init__(self, text_func, align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, animated = True, parent = None, font = None, **kwds):
@@ -133,6 +142,7 @@ class StdInfo(QLabel):
                 y = coords[3] - self.height()
             pos = (x, y)
         self.move(*pos)
+
     def display_func(self, *x):
         self.setText(self.text_func(*x))
         self.adjustSize()
@@ -141,12 +151,14 @@ class StdInfo(QLabel):
             self.show()
             self.anim.stop()
             self.anim.start()
+
     def display_str(self):
         if self.animated:
             self.show()
             # self.anim.updateCurrentValue(1.)
             self.anim.stop()
             self.anim.start()
+
 
 class ReadMediaThread(QThread):
     def __init__(self, fname, queue, priority, size = QSize(800, 600), parent = None, repeat = 1):

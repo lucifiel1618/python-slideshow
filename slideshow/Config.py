@@ -1,8 +1,8 @@
 import collections
 from concurrent.futures import Future, ThreadPoolExecutor
 import dataclasses
+import functools
 import importlib
-import itertools
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Self, Sequence
@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Self, S
 import yaml
 
 from .utils import get_logger
-from .Sorter import FuturePair, GroupedSimilarImageSorter, Pair, SimilarImageSorter, Sorter, RegexSorter, RegexSorterConfig, SorterChain, StrGroup, StrGroups, collect_futures, flatten_futures, wrap_future
+from .Sorter import FuturePair, GroupedSimilarImageSorter, Pair, SimilarImageSorter, Sorter, RegexSorter, RegexSorterCoef, SorterChain, StrGroup, collect_futures
 
 logger = get_logger('Slideshow.Config')
 
@@ -22,137 +22,35 @@ class Node:
 
 
 @dataclasses.dataclass(slots=True)
-class Element(Node):
-    _meta: list[str] = dataclasses.field(default_factory=list)
-    _patterns: dict[int, list[RegexSorterConfig]] = dataclasses.field(default_factory=dict)
-    _extra_sorters: dict[int, Optional[Sorter]] = dataclasses.field(default_factory=dict)
-
-    def add_pattern(self, p: RegexSorterConfig, i: int = -1) -> None:
-        if not isinstance(p.pattern, str):
-            assert i >= 0, 'Token pattern must be given a index.'
-        self._patterns.setdefault(i, []).append(p)
-
-    def add_sorter(self, sorter: Sorter, i: int = -1) -> None:
-        self._extra_sorters[i] = sorter
-
-    @property
-    def meta(self) -> list[str]:
-        if self.parent is None:
-            return self._meta
-        return self.parent.meta + self._meta
-
-    def get_patterns(self) -> list[tuple[int, RegexSorterConfig]]:
-        patterns: list[tuple[int, RegexSorterConfig]] = []
-        for i in self._patterns:
-            for p in self.iter_pattern(i):
-                patterns.append((i, p))
-        return patterns
-
-    def iter_pattern(self, i: int) -> Iterator[RegexSorterConfig]:
-        if i not in self._patterns:
-            return
-        _patterns = self._patterns[i]
-        for p in _patterns:
-            if not isinstance(p.pattern, str):
-                try:
-                    p = p.updated(next(self.parent.iter_pattern(i)))
-                except AttributeError as e:
-                    print(f'{self}')
-                    raise e
-            yield p
-
-    def iter_regex_sorter(self, i: int) -> Iterator[RegexSorter]:
-        for p in self.iter_pattern(i):
-            yield RegexSorter.create(**p._asdict())
-
-    def get_regex_sorters(self) -> list[tuple[int, RegexSorter]]:
-        regex_sorters = []
-        for i in self._patterns:
-            for sorter in self.iter_regex_sorter(i):
-                regex_sorters.append((i, sorter))
-        return regex_sorters
-
-    def iter_extra_sorter(self, i: int) -> Iterator[Sorter]:
-        if i not in self._extra_sorters:
-            return
-        sorter = self._extra_sorters[i]
-        if sorter is not None:
-            yield sorter
-        else:
-            assert self.parent is not None
-            yield from self.parent.iter_regex_sorter(i)
-            yield from self.parent.iter_extra_sorter(i)
-
-    def get_extra_sorters(self) -> list[tuple[int, Sorter]]:
-        '''
-        Extra sorters include fully inherited RegexSorters as well
-        '''
-        extra_sorters: list[tuple[int, Sorter]] = []
-        for i in self._extra_sorters:
-            extra_sorters.extend(((i, sorter) for sorter in self.iter_extra_sorter(i)))
-        return extra_sorters
-
-    def get_sorters(self) -> list[Sorter]:
-        sorters: list[Sorter] = [
-            sorter for _, sorter in sorted(self.get_regex_sorters() + self.get_extra_sorters())
-        ]
-        return sorters
-
-    def get_sorterchain(self) -> SorterChain:
-        return SorterChain(self.get_sorters())
-
-    def separated(self, dataset: Iterable[str]) -> Pair[StrGroup]:
-        return self.get_sorterchain().separated(dataset)
-
-    def _separated_async(
-        self,
-        ft_in: Future[StrGroups],
-        executor: ThreadPoolExecutor
-    ) -> FuturePair[StrGroups]:
-        return self.get_sorterchain()._separated_async(FuturePair.create(ft_in, StrGroups([[]])), executor=executor)
-
-    def separated_async(
-        self,
-        ft_in: Future[StrGroup],
-        executor: ThreadPoolExecutor
-    ) -> FuturePair[StrGroup]:
-        wrapped_ft_in: Future[StrGroups] = executor.submit(wrap_future, ft_in)
-        fts = self._separated_async(wrapped_ft_in, executor=executor)
-        return FuturePair(*(executor.submit(flatten_futures, ft) for ft in fts))
-
-
-@dataclasses.dataclass(slots=True)
 class Domain(Node):
-    elements: list[Element] = dataclasses.field(default_factory=lambda: [Element(id='base')])
-    is_linked: bool = False
+    _sorters: list[None | Sorter | RegexSorterCoef] = dataclasses.field(default_factory=list)
+    meta: list[str] = dataclasses.field(default_factory=list)
 
-    def create_element(self, *args, **kwds) -> Element:
-        e = Element(*args, **kwds)
-        self.elements.append(e)
-        return e
+    def get_sorter(self, i) -> Sorter:
+        sorter = self._sorters[i]
+        if sorter is None:
+            assert self.parent is not None
+            return self.parent.get_sorter(i)
+        elif isinstance(sorter, RegexSorterCoef):
+            coeffs = [sorter]
+            n = self
+            while n.parent is not None:
+                n = n.parent
+                try:
+                    coeffs.append(n._sorters[i])
+                except IndexError:
+                    pass
+            sorter = RegexSorter.create(
+                **functools.reduce(RegexSorterCoef.updated_by, reversed(coeffs))._asdict()
+            )
+        return sorter
 
-    def link(self) -> None:
-        if self.is_linked:
-            return
-        self.is_linked = True
-        if self.parent is None:
-            return
-        self.elements[0].parent = self.parent.elements[0]
-        if len(self.parent.elements) > 1:
-            assert len(self.parent.elements) == 2
-            for e in self.elements[1:]:
-                e.parent = self.parent.elements[1]
-        self.parent.link()
+    def get_sorter_chain(self) -> SorterChain:
+        n = len(self._sorters)
+        return SorterChain([self.get_sorter(i) for i in range(n)])
 
     def separated(self, dataset: Iterable[str]) -> Pair[StrGroup]:
-        k_out = StrGroup()
-        d = StrGroup(dataset)
-        for e in self.elements[1:]:
-            logger.debug(f'{e=}')
-            k, d = e.separated(d)
-            k_out.extend(k)
-            logger.debug(f'{d=}')
-        return Pair(k_out, d)
+        return self.get_sorter_chain().separated(dataset)
 
     def separated_async(self, ft_in: Future[StrGroup], executor: ThreadPoolExecutor) -> FuturePair[StrGroup]:
         ft_d = ft_in
@@ -164,11 +62,12 @@ class Domain(Node):
         return fts_out
 
     def combined(self, b: Self) -> Self:
-        combined = Domain()
-        combined.elements[0]._meta = self.elements[0]._meta + b.elements[0]._meta
-        for element in self.elements[1:] + b.elements[1:]:
-            combined.elements.append(element)
-        return combined
+        return self.__class__(
+            self.id,
+            None,
+            self._sorters + b._sorters,
+            self.meta + b.meta
+        )
 
 
 def get_processor(
@@ -214,7 +113,6 @@ class ConfigReader:
     def __post_init__(self):
         for ch in self.chapters:
             ch.parent = self._global
-            ch.link()
 
     def combined(self, b: Self) -> Self:
         header = self.header.combined(b.header)
@@ -237,10 +135,10 @@ class ConfigReader:
         meta: Optional[Sequence[str]] = None,
         sorter: Optional[str] = None
     ) -> Self:
-        header = Domain()
+        header = Domain('header')
         if meta is not None:
-            header.elements[0]._meta.extend(meta)
-        _global = Domain()
+            header.meta.extend(meta)
+        _global = Domain('global')
         chapters: list[Domain] = []
         ditches: list[Domain] = []
 
@@ -257,15 +155,13 @@ class ConfigReader:
                     n = Domain(id)
                     chapters.append(n)
                 case 'ditch':
-                    n = Domain()
+                    n = Domain('ditch')
                     ditches.append(n)
 
-            for p in patterns:
-                e = n.create_element()
-                e.add_pattern(RegexSorterConfig(pattern=p))
+            n._sorters.append(RegexSorterCoef(pattern=tuple(patterns)))
 
             if sorter is not None:
-                n.create_element().add_sorter(sorter)
+                n._sorters.append(sorter)
 
         return cls(header, _global, chapters, ditches)
 
@@ -294,9 +190,7 @@ class ConfigReader:
                     n = Domain('ditch')
                     ditches.append(n)
 
-            n.elements[0].meta.extend(en.get('cmd', []))
-
-            pattern_chains, kepts, _ditches = [], [], []
+            n.meta.extend(en.get('cmd', []))
 
             for p in cls.get_group(en, []):
                 sorter_type: str | None = p.pop('type')
@@ -306,33 +200,20 @@ class ConfigReader:
                         patterns = [patterns]
                     else:
                         patterns = [(p,) if isinstance(p, str) else p for p in patterns]
-                    kepts.append(cls.container_fmt(p.get('keep', None)))
-                    _ditches.append(cls.container_fmt(p.get('ditch', None)))
-                    pattern_chains.append(patterns)
+
+                    keep = cls.container_fmt(p.get('keep', None))
+                    ditch = cls.container_fmt(p.get('ditch', None))
+                    args = [p[f] for f in RegexSorterCoef._fields[3:] if f in p]
+                    n._sorters.append(RegexSorterCoef(tuple(patterns), keep, ditch, *args))
                 else:
                     if sorter_type == 'image':
-                        pattern_chains.append([SimilarImageSorter.create(**p)])
+                        n._sorters.append(SimilarImageSorter.create(**p))
                     elif sorter_type == 'image_group':
-                        pattern_chains.append([GroupedSimilarImageSorter.create(**p)])
+                        n._sorters.append(GroupedSimilarImageSorter.create(**p))
                     elif sorter_type is None:
-                        pattern_chains.append([None])
-                    kepts.append(None)
-                    _ditches.append(None)
-            logger.debug(f'{pattern_chains=}')
-            if not pattern_chains:
-                # itertools.product(*[]) -> [()] instead of [] for some reasons
-                # Hence such special case needs to be handled specifically
-                logger.debug('skipping empty chains')
-                continue
-            for pattern_chain in itertools.product(*pattern_chains):
-                logger.debug(f'{pattern_chain=}')
-                e = n.create_element()
-                for i, pattern in enumerate(pattern_chain):
-                    if isinstance(pattern, Sorter) or pattern is None:
-                        e.add_sorter(pattern, i=i)
+                        n._sorters.append(None)
                     else:
-                        e.add_pattern(RegexSorterConfig(pattern, kepts[i], _ditches[i]), i=i)
-                print(e)
+                        raise TypeError(f'Unknown sorter type "{sorter_type}"')
 
         return cls(header, _global, chapters, ditches)
 
@@ -399,7 +280,7 @@ class ConfigReader:
         return result
 
     @staticmethod
-    def get_group(en: dict[str, Any], default: Optional[list] = None) -> list[dict[str, Any]]:
+    def get_group(en: dict[str, Any], default: Optional[list] = None) -> Iterator[dict[str, Any]]:
         try:
             g: list[str | list[str] | dict[str, Any] | None] = en['group']
         except KeyError as e:
@@ -414,7 +295,15 @@ class ConfigReader:
                 if default is not None:
                     return default
                 raise e
-        return [en if isinstance(en, dict) else {'pattern': en, 'type': 'path'} if en is not None else {'type': None} for en in g]
+        for sorter in g:
+            if isinstance(sorter, dict):
+                if 'type' not in sorter:
+                    sorter['type'] = 'path'
+                yield sorter
+            elif sorter is not None:
+                yield {'pattern': sorter, 'type': 'path'}
+            else:
+                yield {'type': None}
 
     @classmethod
     def get_domain_id(cls, en: dict[str, Any], default: Optional[str] = None) -> str:
