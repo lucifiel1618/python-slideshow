@@ -1,15 +1,18 @@
 #!/opt/homebrew/bin/python3
 from __future__ import unicode_literals
+
 from pathlib import Path
 import argparse
 import sys
+
 from . import utils
+from . import AlbumReader
 
 PLAY = 'qt+ffmpeg'
 logger = utils.get_logger('slideshow')
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description='Python Slideshow',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter, add_help=False)
     parser.add_argument(
@@ -32,10 +35,9 @@ def main():
     parser.add_argument('f', nargs='*', type=str, help='Input file name.')
     for backend in [
         'play',
-        'qt', 'qt+vlc', 'qt+ffmpeg',
-        'tk',
+        'qt+ffmpeg',
         'mp4',
-        'stream',
+        'stream', 'runserver',
         'template'
     ]:
         backend_parser = backend_parsers.add_parser(
@@ -45,7 +47,7 @@ def main():
             backend_parser.add_argument('--for-each', action='store_true',
                                         help='If activated, output a video file per chapter')
             backend_parser.add_argument('--for-each-output-pattern', type=str,
-                                        default='{chapter_id}.mp4',
+                                        default='{CHAPTER_ID}.mp4',
                                         help='Output file name pattern in `for each` syntax.')
             backend_parser.add_argument('-o', '--output', default=[], action='append', help='Output file names')
             backend_parser.add_argument('-a', '--aspect', default='16X9', help='Aspect ratio')
@@ -58,12 +60,16 @@ def main():
             backend_parser.add_argument('--for-each', action='store_true',
                                         help='If activated, output a video file per chapter')
             backend_parser.add_argument('--for-each-output-pattern', type=str,
-                                        default='{chapter_id}.mp4',
+                                        default='{CHAPTER_ID}.ts',
                                         help='Output file name pattern in `for each` syntax.')
             backend_parser.add_argument('-o', '--output', default=[], action='append', help='Output file names')
             backend_parser.add_argument('-a', '--aspect', default='16X9', help='Aspect ratio')
             backend_parser.add_argument('--force', '-F', action='store_true',
                                         help='Force rerun if the output file exists already.')
+        if backend == 'runserver':
+            backend_parser.add_argument('-a', '--aspect', default='16X9', help='Aspect ratio')
+            backend_parser.add_argument('--srcdir', help='Root directory of media resources')
+            backend_parser.add_argument('--dstdir', help='Root directory of output video files')
         if backend == 'template':
             backend_parser.add_argument('-o', '--output', default=[], action='append', help='Output file name')
             backend_parser.add_argument('--empty', action='store_true',
@@ -108,7 +114,7 @@ def main():
         # assert len(args.chapter) == len(args.output)
         chapters = args.chapter
     else:
-        chapters = [None]
+        chapters = None
         PER_CHAPTER = False
 
     if gui_backend in ('qt', 'qt6'):
@@ -131,58 +137,21 @@ def main():
             app.show_slides()
             a.exec()
     elif gui_backend == 'stream':
-        from .StreamFFMPEG import App
-        assert len(args.f) == 1
-
-        if args.for_each:
-            chapters.clear()
-            PER_CHAPTER = True
-            from . import AlbumReader
-            for chapter in AlbumReader.AlbumReader._get_items_of_tag(
-                None, AlbumReader.ALBUM_FILE, root='body'
-            ):
-                chapter_id = chapter.get('id', None)
-                if chapter_id is not None:
-                    chapters.append(chapter_id)
-
-        IN = Path(args.f[0]).resolve()
-        output_formatter = {}
-        if IN.is_dir():
-            output_formatter['IN_DIR'] = IN
-            output_formatter['IN'] = IN
-            output_formatter['IN_STEM'] = IN.parts[-1]
-        else:
-            output_formatter['IN_DIR'] = IN.parent
-            output_formatter['IN'] = IN.with_suffix('')
-            output_formatter['IN_STEM'] = IN.stem
-        print(f'{output_formatter=}')
-        print(f'{args.output=}')
-
-        outputs = [o if not o.is_dir() else o / (Path(o.name).with_suffix('.ts'))
-                   for o in (Path(o.format(**output_formatter)).expanduser().resolve() for o in args.output or ['.'])]
-
-        assert len(outputs) == 1
-        app = App(args.f, args.delay, rate=args.rate, aspect=args.aspect.upper(), chapters=chapters)
-        app.show_slides(outputs[0])
+        from . import StreamFFMPEG
+        for _ in StreamFFMPEG.run_app_pipe(args.f, args.output, args.delay, args.rate, args.aspect, args.chapter):
+            ...
+    elif gui_backend == 'runserver':
+        from . import StreamFFMPEG
+        StreamFFMPEG.start_server(args)
     elif gui_backend == 'mp4':
         # from Mp4Movie import App
         from .VideoFFMPEG import App
         assert len(args.f) == 1
-
-        if args.for_each:
-            chapters.clear()
-            PER_CHAPTER = True
-            from . import AlbumReader
-            for chapter in AlbumReader.AlbumReader._get_items_of_tag(
-                None, AlbumReader.ALBUM_FILE, root='body'
-            ):
-                chapter_id = chapter.get('id', None)
-                if chapter_id is not None:
-                    chapters.append(chapter_id)
-                    args.output.append(args.for_each_output_pattern.format(chapter_id=chapter_id))
-
-        outputs = [o if not o.is_dir() else o / (Path(o.name).with_suffix('.mp4'))
-                   for o in (Path(o.format(IN=o)).expanduser().resolve() for o in args.output or ['.'])]
+        outputs, chapters = zip(
+            *AlbumReader.iomap(
+                args.f, args.chapter, args.output, args.for_each, args.for_each_output_pattern
+            ).items()
+        )
         if PER_CHAPTER:
             maxl_chapters = max(len(c) for c in chapters)
             maxl_outpus = max(len(str(o)) for o in outputs)
@@ -195,8 +164,9 @@ def main():
                 logger.info(f'File `{output}` already exists. Skip!')
                 continue
             logger.info(f'Start creating file `{output}`...')
-            app = App(args.f, args.delay, rate=args.rate, aspect=args.aspect.upper(),
-                      qsize=args.qsize, chapters=[chapter])
+            app = App(
+                args.f, args.delay, rate=args.rate, aspect=args.aspect.upper(), qsize=args.qsize, chapters=chapter
+            )
             app.dryrun = args.dryrun
             app.show_slides(output)
         if args.m3u:
@@ -208,7 +178,6 @@ def main():
             with f.open('w') as of:
                 of.writelines([f'{output.relative_to(d)}\n' for output in outputs[:-1]] + [str(outputs[-1].relative_to(d))])
     elif gui_backend == 'template':
-        from . import AlbumReader
         assert len(args.f) == 1
         d = args.f[0]
         assert Path(d).is_dir()

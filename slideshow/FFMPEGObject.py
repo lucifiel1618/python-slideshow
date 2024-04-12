@@ -9,9 +9,12 @@ import ffmpeg
 from . import utils
 
 
-BIN_DIR = Path('/opt/homebrew/bin/')
-FFMPEG_BIN = str(BIN_DIR / 'ffmpeg')
-FFPROBE_BIN = str(BIN_DIR / 'ffprobe')
+def find_executable(executable_name: str) -> str:
+    return subprocess.check_output(['which', executable_name]).strip().decode()
+
+
+FFMPEG_BIN = find_executable('ffmpeg')
+FFPROBE_BIN = find_executable('ffprobe')
 
 T = TypeVar('T')
 LogLevel = Literal['debug', 'info', 'warning', 'error', 'quiet']
@@ -58,7 +61,7 @@ class FFMPEGObject(Generic[T]):
     @property
     def size(self) -> tuple[int, int]:
         return self._size
-    
+
     @size.setter
     def size(self, size: tuple[int, int]) -> None:
         self._size = size
@@ -67,7 +70,7 @@ class FFMPEGObject(Generic[T]):
     @property
     def rate(self) -> float:
         return self._rate
-    
+
     @rate.setter
     def rate(self, rate: float):
         self._rate = rate

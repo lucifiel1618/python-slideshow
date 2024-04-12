@@ -14,4 +14,4 @@ RUN if [ "$GUI" = "true" ]; then \
     && eval "pip install ${WORKDIR}/${PROJECT_NAME}${PIP_INSTALL_CMD_SUFFIX}" \
     && rm -r ${WORKDIR}/${PROJECT_NAME}
 
-ENTRYPOINT ["sh"]
+ENTRYPOINT ["slideshow"]

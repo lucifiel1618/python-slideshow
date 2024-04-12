@@ -322,7 +322,6 @@ class App(Resizable):
         self.rate: float = rate
         self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files, chapters=chapters)
         self.set_size()
-        self.maxqsize: int = 10
         self.queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]] = queue.Queue(qsize)
         self._tempd = QTemporaryDir()
         self.destroyed.connect(self._tempd.remove)  # type: ignore

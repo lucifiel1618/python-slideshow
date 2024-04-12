@@ -216,10 +216,10 @@ class AlbumReader:
 
     @staticmethod
     def _get_album_and_directory(
-        album: ET.Element | str,
+        album: ET.Element | str | Path,
         directory: str = ''
     ) -> tuple[ET.Element, str]:
-        if isinstance(album, str):
+        if isinstance(album, (str, Path)):
             if os.path.isdir(album):
                 directory = album
                 albumfile = os.path.join(directory, ALBUM_FILE)
@@ -445,3 +445,62 @@ class AlbumReader:
         else:
             import webbrowser
             webbrowser.open(str(path))
+
+
+def iomap(
+    f: list[str],
+    chapters: Optional[list[str]],
+    outputs: list[str] | Literal['pipe'],
+    for_each: bool,
+    output_pattern: Optional[str] = None
+) -> dict[Path, list[str] | None]:
+    if not f:
+        f = ['.']
+    if chapters or for_each:
+        assert len(f) == 1
+    IN = Path(f[0]).resolve().expanduser()
+    if not outputs:
+        assert output_pattern is not None
+    if chapters is None:
+        chapters = []
+    if for_each:
+        assert not chapters
+        if IN.is_dir():
+            album = IN / ALBUM_FILE
+        else:
+            assert IN.suffix == '.album'
+            album = IN
+        for chapter in AlbumReader._get_items_of_tag(
+            None, album, root='body'
+        ):
+            chapter_id = chapter.get('id', None)
+            if chapter_id is not None:
+                chapters.append(chapter_id)
+
+    output_map: dict[Path | str, list[str] | None] = {}
+
+    if outputs == 'pipe:':
+        output_map['pipe:'] = chapters if chapters else None
+    else:
+        outfmt = {}
+        if IN.is_dir():
+            outfmt['IN_DIR'] = IN
+            outfmt['IN'] = IN
+            outfmt['IN_STEM'] = IN.parts[-1]
+        else:
+            outfmt['IN_DIR'] = IN.parent
+            outfmt['IN'] = IN.with_suffix('')
+            outfmt['IN_STEM'] = IN.stem
+        if not outputs:
+            outputs[:] = (output_pattern for _ in chapters)
+        elif len(outputs) > 1:
+            assert len(outputs) == len(chapters)
+        if len(outputs) == 1:
+            p = Path(outputs[0].format(**outfmt)).expanduser().resolve()
+            output_map[p] = chapters if chapters else None
+        else:
+            for output, chapter in zip(outputs, chapters):
+                outfmt['CHAPTER_ID'] = chapter
+                p = Path(output.format(**outfmt)).expanduser().resolve()
+                output_map[p] = [chapter]
+    return output_map

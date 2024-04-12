@@ -1,15 +1,17 @@
-from pathlib import Path
-from PIL import Image
-import logging
-import random
+from __future__ import annotations
 from collections import Counter
-import math
-import ffmpeg
-import multiprocessing as mp
-from typing import Callable, Iterable, Literal, Optional, Sequence, TypeVar
 import functools
-
+import logging
+import math
+import multiprocessing as mp
+from pathlib import Path
+import random
 import re
+
+from typing import Callable, Iterable, Iterator, Literal, Optional, Self, Sequence, TypeVar
+
+from PIL import Image
+import ffmpeg
 
 LOG_LEVEL = 'DEBUG'
 FFMPEG_LOGLEVEL = 'debug'
@@ -31,7 +33,7 @@ def addLoggingLevel(levelName, levelNum, methodName=None):
 
     To avoid accidental clobberings of existing attributes, this method will
     raise an `AttributeError` if the level name is already an attribute of the
-    `logging` module or if the method name is already present 
+    `logging` module or if the method name is already present
 
     Example
     -------
@@ -86,20 +88,18 @@ def get_logger(
             from humanfriendly.terminal import terminal_supports_colors
         except ModuleNotFoundError:
             has_colorlogs = False
-    if has_colorlogs:
-        fmt = {
-            'fmt': '{asctime} {name} {levelname} {message}',
-            'datefmt': '%H:%M:%S',
-            'style': '{'
-        }
-    else:
-        fmt = {
-            'format': '%(asctime)s %(name)s %(levelname)s %(message)s',
-            'datefmt': '%H:%M:%S'
-        }
+    # Logger Creation
     logger = logging.getLogger(name)
     if logger.hasHandlers():
         return logger
+    # Formatter Setting
+    fmt = {
+        'fmt': '{asctime} {name} {levelname} {message}',
+        'datefmt': '%H:%M:%S',
+        'style': '{'
+    }
+    formatter = (coloredlogs.ColoredFormatter if has_colorlogs else logging.Formatter)(**fmt)
+    # Handlers Setting
     handlers: list[logging.Handler] = []
     if to_stream:
         handlers.append(logging.StreamHandler())
@@ -109,11 +109,10 @@ def get_logger(
         else:
             logger_path = Path(to_file)
         handlers.append(logging.FileHandler(logger_path))
-
     for handler in handlers:
         logger.addHandler(handler)
-        formatter = (coloredlogs.ColoredFormatter if color and terminal_supports_colors() else logging.Formatter)(**fmt)
         handler.setFormatter(formatter)
+    # LoggerLevel Setting
     logger.setLevel(getattr(logging, LOG_LEVEL))
     if color is True and not has_colorlogs:
         logger.info('coloredlogs not installed. uncolored logging will not be populated.')
@@ -144,7 +143,7 @@ def rescaled(image, size, result, i=0, fmt=None):
 
 
 class AspectEstimator:
-    def __init__(self, prop: float = 0.1, default_aspect: Optional[tuple[int, int] | str] = None):
+    def __init__(self, prop: float = 0.1, default_aspect: Optional[tuple[int, int] | Literal['auto']] = None):
         self.logger = get_logger('AspectEstimator')
         self._aspect: Optional[tuple[int, int] | Literal['auto']] = default_aspect
         self._prop: float
@@ -283,3 +282,59 @@ def sampled(dataset: Sequence[T], sample_size: int = 3) -> list[T]:
     step_size = n / sample_size
     result = [dataset[0], *(dataset[int(i * step_size)] for i in range(1, sample_size))]
     return result
+
+
+class ByteStreamReader:
+    cached_streams: list[Self] = []
+
+    def __init__(self, identifiers):
+        self.identifiers = identifiers
+        self.stream = bytearray()
+        self.streams: Iterator[bytes] = iter([])
+        self._cursor: int = 0
+        self._stream_end: int = 0
+        self.total_size = None
+        self.cached_streams.insert(0, self)
+
+    @classmethod
+    def spawn(cls, identifiers) -> Self:
+        try:
+            bs = next(filter(lambda bs: bs.identifiers == identifiers, cls.cached_streams))
+        except StopIteration:
+            bs = cls(identifiers)
+        return bs
+
+    def set_streams(self, streams: Iterator[bytes]) -> None:
+        self.streams = streams
+        self.stream.clear()
+        self._cursor = 0
+        self._stream_end = -1
+
+    def process_next_stream(self) -> bool:
+        print('process next...')
+        try:
+            next_stream = next(self.streams)
+            print(f'{len(next_stream)=}')
+            self._stream_end += len(next_stream)
+            self.stream.extend(next_stream)
+            return False
+        except StopIteration:
+            self.total_size = self._stream_end
+            return True
+
+    def read(self, start: Optional[int] = None, end: Optional[int] = None) -> bytes:
+        if start is None:
+            start = self._cursor
+        elif start < self._cursor:
+            raise IOError()
+        if start > self._stream_end:
+            if self.process_next_stream():
+                return b''
+            return self.read(start, end)
+        self.stream = self.stream[start - self._cursor:]
+        self._cursor = start
+        if end is None:
+            return bytes(self.stream)
+        if end > self._stream_end:
+            return bytes(self.stream) + self.read(self._stream_end + 1, end)
+        return bytes(self.stream[:end - start + 1])
