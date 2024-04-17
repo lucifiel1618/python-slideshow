@@ -90,11 +90,12 @@ def _ffmpeg_read(
     iterable: Iterable[ET.Element],
     ffmpeg_object: FFMPEGObject.FFMPEGObject,
     dpath: str,
-    segment_time: int = 10,
+    segment_time: float = 10,
     callback: Optional[Callable[[], None]] = None,
 ) -> None:
     # with multiprocessing.Pool(None, limit_cpu) as pool:
     limit_cpu = (multiprocessing.cpu_count() - 1) or 1
+    segment_time = segment_time * ffmpeg_object.rate
     with multiprocessing.Pool(limit_cpu) as pool:
         logger.debug('Submmiting jobs to media processing queue...')
         index = 0

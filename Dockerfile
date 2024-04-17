@@ -25,7 +25,7 @@ CMD [ \
         "--srcdir", "/python-slideshow/media/disk", \
         "--dstdir", "/python-slideshow/media/_temp", \
         "--port", "10011", \
-        "--log-level", "INFO" \
-        # "--ffmpeg-loglevel", "QUIET" \
+        "--log-level", "INFO", \
+        "--ffmpeg-loglevel", "QUIET" \
     ]
 EXPOSE 10011
