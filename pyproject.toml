@@ -14,11 +14,13 @@ version = "2.0.0"
 dependencies = [
     "pillow",
     "ffmpeg-python",
-    "PyYAML"
+    "PyYAML",
+    "coloredlogs"
 ]
 
 [project.optional-dependencies]
 gui = ["pyqt6", "python-vlc"]
+server = ['fastapi', 'uvicorn']
 
 [project.scripts]
 slideshow = "slideshow.slideshow:main"

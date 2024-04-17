@@ -140,6 +140,7 @@ def _ffmpeg_read(
                 skipped -= 1
             else:
                 qput = queue.put
+                fname = f'{dpath}/{index:0>4}.ts'
             qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
         pool.close()
         logger.debug('Submmiting jobs to media processing queue finished. Waiting for jobs to end...')
@@ -205,7 +206,7 @@ class ReadMediaThread(QThread):
         self.delay = delay
         self.size = size
         self.dpath = dpath
-        self.loglevel = loglevel
+        self.loglevel: Optional[FFMPEGObject.LogLevel] = loglevel
 
     def run(self) -> None:
         logger.debug('Initializing video thread...')

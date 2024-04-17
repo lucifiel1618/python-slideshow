@@ -70,6 +70,7 @@ def main() -> None:
             backend_parser.add_argument('-a', '--aspect', default='16X9', help='Aspect ratio')
             backend_parser.add_argument('--srcdir', help='Root directory of media resources')
             backend_parser.add_argument('--dstdir', help='Root directory of output video files')
+            backend_parser.add_argument('--port', default=8000, type=int, help='Port')
         if backend == 'template':
             backend_parser.add_argument('-o', '--output', default=[], action='append', help='Output file name')
             backend_parser.add_argument('--empty', action='store_true',

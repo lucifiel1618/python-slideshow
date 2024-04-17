@@ -6,9 +6,12 @@ from multiprocessing.pool import AsyncResult
 import queue
 import shutil
 import threading
+from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 from typing import Callable, Iterator, Literal, Optional, Iterable, Sequence, TypedDict
 from pathlib import Path
+
+from fastapi.responses import FileResponse
 
 from . import utils
 from . import AlbumReader
@@ -85,46 +88,47 @@ def process_meta(command: str) -> FFMPEGObject.VideoMeta:
 def _ffmpeg_read(
     queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]],
     iterable: Iterable[ET.Element],
-    delay: float,
-    size: tuple[int, int],
+    ffmpeg_object: FFMPEGObject.FFMPEGObject,
     dpath: str,
     segment_time: int = 10,
-    loglevel: Optional[FFMPEGObject.LogLevel] = None,
-    callback: Optional[Callable[[], None]] = None
+    callback: Optional[Callable[[], None]] = None,
 ) -> None:
     # with multiprocessing.Pool(None, limit_cpu) as pool:
-    with multiprocessing.Pool(multiprocessing.cpu_count() - 1) as pool:
+    limit_cpu = (multiprocessing.cpu_count() - 1) or 1
+    with multiprocessing.Pool(limit_cpu) as pool:
         logger.debug('Submmiting jobs to media processing queue...')
-        ffmpeg_object = FFMPEGObject.FFMPEGObjectLive(delay, size, loglevel=loglevel)
         index = 0
         skipped = 0
         logger.debug('Iterating over files...')
+        current_pts = 0.
         for media in iterable:
             logger.detail(f'Processing {media}...')
             if media.tag == 'meta':
                 queue.put_nowait(pool.apply_async(process_meta, (media.get('command'),)))
                 skipped += 1
-                continue
-            ffmpeg_object.add_stream(media)
-
-            if ffmpeg_object.total_duration > segment_time:
-                if skipped > 0:
-                    qput = queue.put_nowait
-                    skipped -= 1
-                else:
-                    qput = queue.put
-                    fname = f'{dpath}/{index:0>4}.ts'
-                logger.detail(f'Queuing `{fname}`')
-                qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
-                ffmpeg_object.reset()
-                index += 1
-            logger.detail(f'End processing {media}...')
+            else:
+                ffmpeg_object.add_stream(media)
+                if ffmpeg_object.total_duration > segment_time:
+                    if skipped > 0:
+                        qput = queue.put_nowait
+                        skipped -= 1
+                    else:
+                        qput = queue.put
+                        fname = f'{dpath}/{index:0>4}.ts'
+                    logger.detail(f'Queuing `{fname}`...')
+                    ffmpeg_object.start_pts = int(round(current_pts))
+                    qput(pool.apply_async(ffmpeg_object.compile_call(fname, f'{fname}.part')))  # type: ignore
+                    current_pts += ffmpeg_object.total_duration * 90000 / ffmpeg_object.rate
+                    ffmpeg_object.reset()
+                    index += 1
         if ffmpeg_object.streams:
             if skipped > 0:
                 qput = queue.put_nowait
                 skipped -= 1
             else:
                 qput = queue.put
+                fname = f'{dpath}/{index:0>4}.ts'
+            ffmpeg_object.start_pts = round(current_pts)
             qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
         pool.close()
         logger.debug('Submmiting jobs to media processing queue finished. Waiting for jobs to end...')
@@ -178,8 +182,8 @@ class App:
         if self.media_thread is None:
             self.media_thread = threading.Thread(
                 target=_ffmpeg_read,
-                args=(self.queue, iter(self.album), self.delay, self.size, str(output_dir)),
-                kwargs=dict(loglevel='error', callback=callback)
+                args=(self.queue, iter(self.album), self.ffmpeg_object, str(output_dir)),
+                kwargs=dict(callback=callback)
             )
         self.media_thread.start()
         logger.debug('Terminating video thread...')
@@ -214,6 +218,9 @@ class App:
         for _ in self.play_next(True):
             ...
         self.media_thread.join()
+
+    def set_ffmpeg_loglevel(self, value: Optional[FFMPEGObject.LogLevel] = None) -> None:
+        self.ffmpeg_object.loglevel = value
 
     @property
     def delay(self) -> int:
@@ -280,9 +287,14 @@ class App:
 
 
 class Resource:
-    def __init__(self, path_from: Path, rootdir: Optional[Path] = None):
+    def __init__(
+            self,
+            id: Optional[str] = None,
+            path_from: Optional[Path] = None,
+            rootdir: Optional[Path] = None
+    ):
         self.path_from = path_from
-        self.id: str = self.get_id(path_from)
+        self.id: str = id if id is not None else self.get_id(path_from)
         self.path = rootdir / self.id if rootdir is not None else Path(self.id)
         self.status_file = self.path / 'STATUS'
 
@@ -309,8 +321,12 @@ class Resource:
             shutil.rmtree(self.path)
         self.status_file.write_text(status)
 
+    @staticmethod
+    def get_segment_base(index: int | str, ext: str) -> str:
+        return f'{index:0>4}{ext}'
+
     def get_segment(self, index: int, ext: str) -> Path:
-        return self.path / f'{index:0>4}{ext}'
+        return self.path / self.get_segment_base(index, ext)
 
 
 def start_server(args: Namespace | None = None):
@@ -321,14 +337,17 @@ def start_server(args: Namespace | None = None):
         mediadir = Path('media')
         srcdir = mediadir / 'disk'
         dstdir = mediadir / '_temp'
+        port = 8000
+        ffmpeg_loglevel = 'DEBUG'
     else:
         srcdir = Path(args.srcdir)
         dstdir = Path(args.dstdir)
+        port = args.port
+        ffmpeg_loglevel = args.ffmpeg_loglevel
+    assert srcdir.exists()
     assert dstdir.exists()
 
-    buffer = []
-
-    @api.get('/path/{path}')
+    @api.get('/path/{path:path}')
     async def run_server(
         path: str,
         request: fastapi.Request,
@@ -337,6 +356,7 @@ def start_server(args: Namespace | None = None):
         rate: Optional[float] = None,
         aspect: Optional[str] = None
     ):
+        path = unquote(path)
         if path == '$PWD':
             path = '.'
         if args is not None:
@@ -347,41 +367,62 @@ def start_server(args: Namespace | None = None):
             if aspect is None:
                 aspect = args.aspect
         _chapters = chapters.split(',') if chapters is not None else None
-        resource = Resource(srcdir / path, dstdir)
+        resource = Resource(path_from=srcdir / path, rootdir=dstdir)
         if not resource.get_status():
             resource.initialize()
-            print(f'{resource.path_from}')
             app = App([str(resource.path_from)], delay, rate=rate, aspect=aspect.upper(), chapters=_chapters)
+            app.set_ffmpeg_loglevel(ffmpeg_loglevel)
             app.process(resource.path, callback=lambda: resource.set_status('finished'))
             next(app.play_next(True))  # waiting for the first segment to finish
-        return (await get_playlist(path, 0, request))
+        return (await get_playlist(resource.id, 0, request))
 
-    @api.get('/path/{path}/{segment}.m3u8')
+    @api.get('/resource/{path}/{segment}.m3u8')
     async def get_playlist(path: str, segment: int, request: fastapi.Request):
         url = request.url
-        content_lines = []
-        resource = Resource(srcdir / path, dstdir)
+        content_lines = [
+            '#EXTM3U',
+            '#EXT-X-VERSION:4',
+            # '#EXT-X-PLAYLIST-TYPE:VOD',
+            '#EXT-X-PLAYLIST-TYPE:EVENT',
+            '#EXT-X-TARGETDURATION:10',
+            f'#EXT-X-MEDIA-SEQUENCE:{segment}'
+        ]
         _segment = segment
+        resource = Resource(path, rootdir=dstdir)
         f = resource.get_segment(_segment, '.ts')
         while f.exists():
-            content_lines.append(str(url.replace(path=f'/path/{path}/{f.name}')))
+            if segment != _segment:
+                # content_lines.append('#EXT-X-DISCONTINUITY')
+                ...
+            content_lines.extend(
+                [
+                    f'#EXTINF:{FFMPEGObject.FFMPEGObjectLive._get_media_duration(str(f))[0]:.2f},',
+                    str(url.replace(path=f'/resource/{path}/{f.name}'))
+                ]
+            )
             _segment += 1
             f = resource.get_segment(_segment, '.ts')
         status = resource.get_status()
-        if not content_lines and status == 'created':
+        if segment == _segment and status == 'created':
             await asyncio.sleep(1)
             return (await get_playlist(path, segment, request))
         if status != 'finished':
-            content_lines.append(str(url.replace(path=f'/path/{path}/{_segment:0>4}.m3u8')))
-        return fastapi.Response('\n'.join(content_lines), media_type='application/x-mpegurl')
+            content_lines.extend(
+                [
+                    '#EXT-X-STREAM-INF:',
+                    str(url.replace(path=f'/resource/{path}/{Resource.get_segment_base(_segment, ".m3u8")}'))
+                ]
+            )
+        else:
+            content_lines.append('#EXT-X-ENDLIST')
+        return fastapi.Response('\n'.join(content_lines), media_type='application/vnd.apple.mpegurl')
 
-    @api.get('/path/{path}/{segment}.ts')
-    async def get_video(path: str, segment: int):
-        resource = Resource(srcdir / path, dstdir)
-        f = resource.get_segment(segment, '.ts')
-        return fastapi.responses.FileResponse(f, media_type='video/mpegts', content_disposition_type='inline')
+    @api.get('/resource/{path}/{segment}.ts')
+    async def get_video(path: str, segment: str) -> FileResponse:
+        f = dstdir / path / Resource.get_segment_base(segment, '.ts')
+        return fastapi.responses.FileResponse(f, media_type='video/mpegts')
 
-    uvicorn.run(api)
+    uvicorn.run(api, host='0.0.0.0', port=port)
 
 
 '''

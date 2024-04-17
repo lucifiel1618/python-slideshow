@@ -20,7 +20,7 @@ COLOR_LOG = True
 T = TypeVar('T')
 
 
-def addLoggingLevel(levelName, levelNum, methodName=None):
+def _addLoggingLevel(levelName, levelNum, methodName=None):
     """
     Comprehensively adds a new logging level to the `logging` module and the
     currently configured logging class.
@@ -71,7 +71,7 @@ def addLoggingLevel(levelName, levelNum, methodName=None):
     setattr(logging, methodName, logToRoot)
 
 
-addLoggingLevel('DETAIL', logging.DEBUG - 5)
+_addLoggingLevel('DETAIL', logging.DEBUG - 5)
 
 
 def get_logger(

@@ -14,6 +14,7 @@ logger = get_logger('slideshow.AlbumReader')
 # logger.setLevel(40)
 
 mimetypes.add_type('text/album', '.album')
+mimetypes.add_type('video/ogg', '.ogv')  # platform dependent, not directly available on linux
 
 ALBUM_FILE = 'pictures.album'
 CONFIG_FILE = 'pictures.yml'
