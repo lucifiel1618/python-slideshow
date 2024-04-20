@@ -8,7 +8,7 @@ import shutil
 import threading
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
-from typing import Callable, Iterator, Literal, Optional, Iterable, Sequence, TypedDict
+from typing import Awaitable, Callable, Iterator, Literal, Optional, Iterable, Sequence, TypedDict
 from pathlib import Path
 
 from fastapi.responses import FileResponse
@@ -348,6 +348,15 @@ def start_server(args: Namespace | None = None):
     assert srcdir.exists()
     assert dstdir.exists()
 
+    # @api.middleware('http')
+    # async def log_requests(
+    #     request: fastapi.Request,
+    #     call_next: Callable[[fastapi.Request], Awaitable[fastapi.Response]]
+    # ) -> fastapi.Response:
+    #     logger.info(f'\"{request.method} {request.url.path} {request.scope["type"]}\"')
+    #     response = await call_next(request)
+    #     return response
+
     @api.get('/path/{path:path}')
     async def run_server(
         path: str,
@@ -356,7 +365,7 @@ def start_server(args: Namespace | None = None):
         delay: Optional[int] = None,
         rate: Optional[float] = None,
         aspect: Optional[str] = None
-    ):
+    ) -> fastapi.Response:
         path = unquote(path)
         if path == '$PWD':
             path = '.'
