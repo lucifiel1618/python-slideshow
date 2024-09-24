@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Self, S
 import yaml
 
 from .utils import get_logger
-from .Sorter import FuturePair, GroupedSimilarImageSorter, Pair, SimilarImageSorter, Sorter, RegexSorter, RegexSorterCoef, SorterChain, StrGroup, collect_futures
+from .Sorter import FuturePair, GroupedSimilarImageFilter, GroupedSimilarImageSorter, Pair, SimilarImageSorter, Sorter, RegexSorter, RegexSorterCoef, SorterChain, StrGroup, collect_futures
 
 logger = get_logger('Slideshow.Config')
 
@@ -210,6 +210,8 @@ class ConfigReader:
                         n._sorters.append(SimilarImageSorter.create(**p))
                     elif sorter_type == 'image_group':
                         n._sorters.append(GroupedSimilarImageSorter.create(**p))
+                    elif sorter_type == 'image_group_filter':
+                        n._sorters.append(GroupedSimilarImageFilter.create(**p))
                     elif sorter_type is None:
                         n._sorters.append(None)
                     else:

@@ -103,6 +103,10 @@ class App(object):
                     width, height = 1280, 720
                 case '9X16':
                     width, height = 720, 1280
+                case '16X10':
+                    width, height = 1152, 720
+                case '10X16':
+                    width, height = 720, 1152
                 case _:
                     width = 1280
 

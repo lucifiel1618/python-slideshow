@@ -9,18 +9,19 @@ authors = [
 description = "Python Slideshow"
 readme = "README.md"
 requires-python = ">=3.11"
-version = "2.0.0"
+version = "2.2.0"
 
 dependencies = [
     "pillow",
     "ffmpeg-python",
     "PyYAML",
-    "coloredlogs"
+    "coloredlogs",
+    "humanfriendly"
 ]
 
 [project.optional-dependencies]
 gui = ["pyqt6", "python-vlc"]
-server = ['fastapi', 'uvicorn']
+server = ["fastapi", "uvicorn"]
 
 [project.scripts]
 slideshow = "slideshow.slideshow:main"

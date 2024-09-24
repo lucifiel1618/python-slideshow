@@ -476,11 +476,11 @@ class App(Resizable):
             try:
                 timeout = 60
                 entry: FFMPEGObject.VideoMeta = self.queue.get(timeout=timeout).get(timeout=timeout)
+                logger.detail(f'Next file found `{entry}`...')
             except queue.Empty as e:
                 e.args = (f'{timeout}s Timeout. Media queue is empty when it shouldn\'t be.', )
                 logger.error(e)
                 raise e
-            logger.detail(f'Next file found `{entry}`...')
             self.queue.task_done()
         else:
             logger.debug('Empty queue. Exiting gracefully.')

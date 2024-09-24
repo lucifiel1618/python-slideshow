@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Iterator, Literal, Optional, Self, Sequen
 from PIL import Image
 import ffmpeg
 
-LOG_LEVEL = 'DEBUG'
+LOGLEVEL = 'DEBUG'
 FFMPEG_LOGLEVEL = 'debug'
 COLOR_LOG = True
 
@@ -86,8 +86,10 @@ def get_logger(
         try:
             import coloredlogs
             from humanfriendly.terminal import terminal_supports_colors
+            has_colorlogs &= terminal_supports_colors()
         except ModuleNotFoundError:
             has_colorlogs = False
+    # assert False, f'{terminal_supports_colors()=}'
     # Logger Creation
     logger = logging.getLogger(name)
     if logger.hasHandlers():
@@ -98,7 +100,10 @@ def get_logger(
         'datefmt': '%H:%M:%S',
         'style': '{'
     }
-    formatter = (coloredlogs.ColoredFormatter if has_colorlogs else logging.Formatter)(**fmt)
+    if color is True and has_colorlogs:
+        formatter = coloredlogs.ColoredFormatter(**fmt)
+    else:
+        formatter = logging.Formatter(**fmt)
     # Handlers Setting
     handlers: list[logging.Handler] = []
     if to_stream:
@@ -113,7 +118,7 @@ def get_logger(
         logger.addHandler(handler)
         handler.setFormatter(formatter)
     # LoggerLevel Setting
-    logger.setLevel(getattr(logging, LOG_LEVEL))
+    logger.setLevel(getattr(logging, LOGLEVEL))
     if color is True and not has_colorlogs:
         logger.info('coloredlogs not installed. uncolored logging will not be populated.')
     return logger

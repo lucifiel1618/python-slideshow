@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import dataclasses
 import functools
 import re
+import textwrap
 from typing import Callable, Generic, Iterable, Literal, NamedTuple, Optional, Self, Sequence, TypeAlias, TypeVar, cast
 from .utils import expand_template, get_logger, sampled
 
@@ -123,7 +124,7 @@ class SimilarImageSorter(Sorter):
         kind: str = 'primary',
         chunk: Optional[int] = None
     ) -> Self:
-        from ImageSorter.image_sorter import image_sorted
+        from image_sorter.image_sorter import image_sorted
         sorter_func = functools.partial(
             image_sorted,
             alg=alg,
@@ -158,8 +159,7 @@ class GroupedSimilarImageSorter(Sorter):
         threshold: Optional[float] = None,
         sample_size: Optional[int] = None
     ) -> Self:
-        from ImageSorter.image_sorter import compare_groups
-
+        from image_sorter.image_sorter import compare_groups
         return cls(functools.partial(compare_groups, alg=alg, threshold=threshold), sample_size)
 
     def _separated(
@@ -174,6 +174,7 @@ class GroupedSimilarImageSorter(Sorter):
         out_pair = Pair(kept, ditched)
 
         for i, group_a in enumerate(datasets):
+            # print('>>>', group_a)
             if group_a in kept:
                 continue
             kept.append(group_a)
@@ -188,8 +189,71 @@ class GroupedSimilarImageSorter(Sorter):
 
             for i, r in enumerate(self.compare_func(sampled_group_a, *sampled_groups_b)):
                 if r:
-                    logger.debug('Match found!')
+                    msg_lines = [
+                        'Match found!',
+                        textwrap.indent(str(sampled_group_a), ' ' * 4),
+                        *(textwrap.indent(str(sampled_group_b), ' ' * 8) for sampled_group_b in sampled_groups_b)
+                    ]
+                    logger.debug('\n'.join(msg_lines))
                     kept.append(groups_b[i])
+        logger.debug(f'result: {kept}')
+        return out_pair
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
+    keep_all: bool = dataclasses.field(default=False, repr=False)
+    reference: str = ''
+
+    @classmethod
+    def create(
+        cls,
+        reference: str,
+        alg: str = 'ccip',
+        threshold: Optional[float] = None,
+        sample_size: Optional[int] = None
+    ) -> Self:
+        from image_sorter.image_sorter import compare_groups
+
+        return cls(
+            functools.partial(compare_groups, alg=alg, threshold=threshold, target='score'),
+            sample_size,
+            reference=reference
+        )
+
+    def _separated(
+        self,
+        datasets: StrGroups,
+        ditched: Optional[StrGroups] = None
+    ) -> Pair[StrGroups]:
+        kept = StrGroups()
+        if ditched is None:
+            ditched = StrGroups()
+        out_pair = Pair(kept, ditched)
+
+        groups_b = datasets
+
+        sampled_groups_b = [
+            sampled(dataset, sample_size=self.sample_size) if self.sample_size is not None else dataset for dataset in datasets
+        ]
+
+        _ditched: StrGroups = StrGroups()
+        for i, r in enumerate(self.compare_func((self.reference,), *sampled_groups_b)):
+            if r:
+                msg_lines = [
+                    'Match found!',
+                    textwrap.indent(str(self.reference), ' ' * 4),
+                    *(textwrap.indent(str(sampled_group_b), ' ' * 8) for sampled_group_b in sampled_groups_b)
+                ]
+                logger.debug('\n'.join(msg_lines))
+                kept.append(groups_b[i])
+            else:
+                _ditched.append(groups_b[i])
+
+        if self.keep_all:
+            kept.extend(_ditched)
+        else:
+            ditched.extend(_ditched)
         logger.debug(f'result: {kept}')
         return out_pair
 

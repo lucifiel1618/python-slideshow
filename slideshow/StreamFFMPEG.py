@@ -8,7 +8,7 @@ import shutil
 import threading
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
-from typing import Awaitable, Callable, Iterator, Literal, Optional, Iterable, Sequence, TypedDict
+from typing import Callable, Iterator, Literal, Optional, Iterable, Sequence, TypedDict
 from pathlib import Path
 
 from fastapi.responses import FileResponse
@@ -357,6 +357,13 @@ def start_server(args: Namespace | None = None):
     #     response = await call_next(request)
     #     return response
 
+    def callback_wrapper(queue: queue.Queue, resource: Resource) -> Callable[[], None]:
+        def callback() -> None:
+            resource.set_status('finished')
+            # queue.all_tasks_done.wait()
+            queue.queue.clear()
+        return callback
+
     @api.get('/path/{path:path}')
     async def run_server(
         path: str,
@@ -366,7 +373,9 @@ def start_server(args: Namespace | None = None):
         rate: Optional[float] = None,
         aspect: Optional[str] = None
     ) -> fastapi.Response:
-        path = unquote(path)
+        # logger.error(f'{path=}')
+        # path = unquote(path)
+        # logger.error(f'{path=}')
         if path == '$PWD':
             path = '.'
         if args is not None:
@@ -382,8 +391,8 @@ def start_server(args: Namespace | None = None):
             resource.initialize()
             app = App([str(resource.path_from)], delay, rate=rate, aspect=aspect.upper(), chapters=_chapters)
             app.set_ffmpeg_loglevel(ffmpeg_loglevel)
-            app.process(resource.path, callback=lambda: resource.set_status('finished'))
-            next(app.play_next(True))  # waiting for the first segment to finish
+            app.process(resource.path, callback=callback_wrapper(app.queue, resource))
+            next(app.play_next(True), None)  # waiting for the first segment to finish
         return (await get_playlist(resource.id, 0, request))
 
     @api.get('/resource/{path}/{segment}.m3u8')

@@ -10,7 +10,10 @@ from . import utils
 
 
 def find_executable(executable_name: str) -> str:
-    return subprocess.check_output(['which', executable_name]).strip().decode()
+    try:
+        return subprocess.check_output(['which', executable_name]).strip().decode()
+    except subprocess.CalledProcessError:
+        return f'/opt/homebrew/bin/{executable_name}'
 
 
 FFMPEG_BIN = find_executable('ffmpeg')
@@ -165,8 +168,8 @@ class FFMPEGObject(Generic[T]):
         try:
             d = FFMPEGObject.probe(path)
             return tuple(
-                float(d['format']['duration']) if scale != 'ts' else
-                next(stream['duration_ts'] for stream in d['streams'] if stream['codec_type'] == 'video')
+                float(d['format'].get('duration', 0)) if scale != 'ts' else
+                next(stream.get('duration_ts', 0) for stream in d['streams'] if stream['codec_type'] == 'video')
                 for scale in scales
             )
         except ffmpeg.Error as e:

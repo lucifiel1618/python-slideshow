@@ -15,6 +15,8 @@ logger = get_logger('slideshow.AlbumReader')
 
 mimetypes.add_type('text/album', '.album')
 mimetypes.add_type('video/ogg', '.ogv')  # platform dependent, not directly available on linux
+mimetypes.add_type('video/x-ms-wmv', '.wmv')  # platform dependent, not directly available on linux
+mimetypes.add_type('image/apng', '.apng')
 
 ALBUM_FILE = 'pictures.album'
 CONFIG_FILE = 'pictures.yml'
@@ -77,7 +79,7 @@ class AlbumReader:
         mimetype_submimetype = mimetypes.guess_type(url)[0]
         if mimetype_submimetype is not None:
             mimetype, submimetype = mimetype_submimetype.split('/')
-            if submimetype in ('gif',):
+            if submimetype in ('gif', 'apng'):
                 return 'animation'
             elif (mimetype, submimetype) == ('text', 'album'):
                 return 'album'

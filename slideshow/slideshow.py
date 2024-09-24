@@ -148,6 +148,8 @@ def main() -> None:
         # from Mp4Movie import App
         from .VideoFFMPEG import App
         assert len(args.f) == 1
+        if not args.output and not args.for_each:
+            args.output.append('{IN_DIR}/{IN_STEM}.mp4')
         outputs, chapters = zip(
             *AlbumReader.iomap(
                 args.f, args.chapter, args.output, args.for_each, args.for_each_output_pattern
