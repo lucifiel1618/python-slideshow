@@ -151,16 +151,18 @@ class GroupedSimilarImageSorter(Sorter):
     compare_func: Callable[[Sequence[str], *tuple[Sequence[str]]], Sequence[bool]]
     sample_size: Optional[int] = None
     keep_all: bool = dataclasses.field(default=True, repr=False)
+    kind: str = 'bruteforce'
 
     @classmethod
     def create(
         cls,
         alg: str = 'pixelwise',
         threshold: Optional[float] = None,
-        sample_size: Optional[int] = None
+        sample_size: Optional[int] = None,
+        kind: str = 'bruteforce'
     ) -> Self:
         from image_sorter.image_sorter import compare_groups
-        return cls(functools.partial(compare_groups, alg=alg, threshold=threshold), sample_size)
+        return cls(functools.partial(compare_groups, alg=alg, threshold=threshold, kind=kind), sample_size)
 
     def _separated(
         self,
@@ -204,6 +206,7 @@ class GroupedSimilarImageSorter(Sorter):
 class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
     keep_all: bool = dataclasses.field(default=False, repr=False)
     reference: str = ''
+    kind: str = 'bruteforce'
 
     @classmethod
     def create(
@@ -211,12 +214,13 @@ class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
         reference: str,
         alg: str = 'ccip',
         threshold: Optional[float] = None,
-        sample_size: Optional[int] = None
+        sample_size: Optional[int] = None,
+        kind: str = 'bruteforce'
     ) -> Self:
         from image_sorter.image_sorter import compare_groups
 
         return cls(
-            functools.partial(compare_groups, alg=alg, threshold=threshold, target='score'),
+            functools.partial(compare_groups, alg=alg, threshold=threshold, target='score', kind=kind),
             sample_size,
             reference=reference
         )
