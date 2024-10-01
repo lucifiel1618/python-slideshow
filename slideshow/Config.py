@@ -211,6 +211,7 @@ class ConfigReader:
                     elif sorter_type == 'image_group':
                         n._sorters.append(GroupedSimilarImageSorter.create(**p))
                     elif sorter_type == 'image_group_filter':
+                        p.setdefault('reference', en.get('image', ''))
                         n._sorters.append(GroupedSimilarImageFilter.create(**p))
                     elif sorter_type is None:
                         n._sorters.append(None)
