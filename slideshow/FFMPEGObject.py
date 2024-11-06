@@ -10,14 +10,23 @@ from . import utils
 
 
 def find_executable(executable_name: str) -> str:
+    executable_name, _, version = executable_name.partition('@')
     try:
-        return subprocess.check_output(['which', executable_name]).strip().decode()
+        # Try `brew`
+        d = subprocess.check_output(
+            ['/opt/homebrew/bin/brew', '--prefix', 'ffmpeg' if not version else f'ffmpeg@{version}']
+        ).strip().decode()
+        return f'{d}/bin/{executable_name}'
     except subprocess.CalledProcessError:
-        return f'/opt/homebrew/bin/{executable_name}'
+        try:
+            # Try `which`
+            return subprocess.check_output(['which', executable_name]).strip().decode()
+        except subprocess.CalledProcessError:
+            return f'/opt/homebrew/bin/{executable_name}'
 
 
-FFMPEG_BIN = find_executable('ffmpeg')
-FFPROBE_BIN = find_executable('ffprobe')
+FFMPEG_BIN = find_executable('ffmpeg@5')
+FFPROBE_BIN = find_executable('ffprobe@5')
 
 T = TypeVar('T')
 LogLevel = Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'QUIET']
@@ -46,8 +55,8 @@ class FFMPEGObject(Generic[T]):
         self.output_kwds = {}
         self._run_args: list[str] = self.DEFAULT_RUN_ARGS
         self._loglevel = loglevel
-        self.streams: list[ffmpeg.Stream] = []
-        self.streams_used: dict[ffmpeg.Stream, int] = {}
+        self.streams: list[ffmpeg.nodes.FilterableStream] = []
+        self.streams_used: dict[ffmpeg.nodes.FilterableStream, int] = {}
         self.total_duration: float = 0.
         self.total_duration_ts: float = 0.
         self._dryrun = False
@@ -135,7 +144,7 @@ class FFMPEGObject(Generic[T]):
     dryrun = property(get_dryrun, set_dryrun)
 
     @staticmethod
-    def print_stream_cmd(stream: ffmpeg.Stream, logf: str | Path = Path('info.txt')):
+    def print_stream_cmd(stream: ffmpeg.nodes.FilterableStream, logf: str | Path = Path('info.txt')):
         if isinstance(logf, str):
             logf = Path(logf)
         with logf.open('a') as logf_of:
@@ -149,9 +158,9 @@ class FFMPEGObject(Generic[T]):
 
     @staticmethod
     def _auto_split_stream(
-        stream: ffmpeg.Stream,
-        streams_used: dict[ffmpeg.Stream, int],
-    ) -> ffmpeg.Stream:
+        stream: ffmpeg.nodes.FilterableStream,
+        streams_used: dict[ffmpeg.nodes.FilterableStream, int],
+    ) -> ffmpeg.nodes.FilterableStream:
         i = streams_used.get(stream, 0)
         streams_used[stream] = i + 1
         return stream.split()[i]  # type: ignore
@@ -188,17 +197,22 @@ class FFMPEGObject(Generic[T]):
 
     @staticmethod
     def _apply_standard_filters(
-        stream: ffmpeg.Stream,
+        stream: ffmpeg.nodes.FilterableStream,
         media_type: str,
         size: tuple[int, int],
         fps: int,
         pts: str = '',
-        dar: str = ''
-    ) -> ffmpeg.Stream:
+        dar: str = '',
+        *,
+        autoscale: bool = True
+    ) -> ffmpeg.nodes.FilterableStream:
+        if autoscale:
+            stream = (
+                stream.filter('scale', *size, force_original_aspect_ratio='decrease')  # type: ignore
+                      .filter('pad', *size, '(ow-iw)/2')
+            )
         stream = (
-            stream.filter('scale', *size, force_original_aspect_ratio='decrease')  # type: ignore
-                  .filter('pad', *size, '(ow-iw)/2')
-                  .filter('setsar', '1')
+            stream.filter('setsar', '1')  # type: ignore
                   .filter('fps', fps)
                   .filter('setdar', dar)
         )
@@ -208,12 +222,19 @@ class FFMPEGObject(Generic[T]):
         #     stream = stream.filter('setdar', dar)
         return stream
 
-    def create_stream(self, media: ET.Element) -> tuple[ffmpeg.Stream, tuple[float, ...]]:
+    def create_stream(self, media: ET.Element, autoscale: bool = True) -> tuple[ffmpeg.nodes.FilterableStream, tuple[float, ...]]:
         if media.tag == 'overlay':
-            overlays = map(self.create_stream, media)
-            stream, durations = next(overlays)
-            for overlay_stream, _ in overlays:
-                stream = stream.overlay(overlay_stream)  # type: ignore
+            stream, durations = self.overlay_stream(media)
+            if autoscale:
+                stream = (
+                    stream.filter('scale', *self.size, force_original_aspect_ratio='decrease')  # type: ignore
+                          .filter('pad', *self.size, '(ow-iw)/2')
+                )
+                stream = (
+                    stream.filter('setsar', '1')  # type: ignore
+                          .filter('fps', self.fps)
+                          .filter('setdar', self.dar)
+                )
         else:
             media_path: str = cast(str, media.get('path'))
             match media_type := media.get('media_type'):
@@ -235,9 +256,8 @@ class FFMPEGObject(Generic[T]):
                     stream = ffmpeg.input(media_path, stream_loop=loop - 1)
                 case _:
                     raise IOError(f'UNKNOWN STREAM: {media_type}({media_path})')
-            pts = self.pts
             stream = self._apply_standard_filters(
-                stream, media_type, self.size, self.fps, pts, self.dar
+                stream, media_type, self.size, self.fps, self.pts, self.dar, autoscale=autoscale
             )
             stream = self._auto_split_stream(stream, self.streams_used)
         return stream, durations
@@ -248,16 +268,16 @@ class FFMPEGObject(Generic[T]):
         self.total_duration += duration
         self.total_duration_ts += duration_ts
 
-    def get_stream(self) -> ffmpeg.Stream:
-        stream: ffmpeg.Stream = ffmpeg.concat(*self.streams)
+    def get_stream(self) -> ffmpeg.nodes.FilterableStream:
+        stream: ffmpeg.nodes.FilterableStream = ffmpeg.concat(*self.streams)
         # if self.start_pts != 0:
         #     stream = stream.filter('setpts', f'{self.start_pts}+PTS')
         return stream
 
-    def output_stream(self, fname: str) -> ffmpeg.Stream:
+    def output_stream(self, fname: str) -> ffmpeg.nodes.FilterableStream:
         output_kwds = self.output_kwds.copy()
         output_kwds['output_ts_offset'] = self.start_pts / 90000
-        stream: ffmpeg.Stream = self.get_stream().output(fname, **output_kwds).global_args(*self.run_args)
+        stream: ffmpeg.nodes.FilterableStream = self.get_stream().output(fname, **output_kwds).global_args(*self.run_args)
         return stream
 
     def print_dryrun(self) -> None:
@@ -266,11 +286,12 @@ class FFMPEGObject(Generic[T]):
     @staticmethod
     def _compile_call(
         fname: str,
-        outstream: ffmpeg.Stream,
+        outstream: ffmpeg.nodes.FilterableStream,
         temp_fname: Optional[str] = None,
         callback: Optional[Callable[[str], T]] = None
     ) -> T | None:
         _fname = temp_fname if temp_fname is not None else fname
+        # print(*outstream.compile())
         outstream.run(cmd=FFMPEG_BIN, overwrite_output=True)  # type: ignore
         if temp_fname is not None:
             shutil.move(_fname, fname)
@@ -309,6 +330,80 @@ class FFMPEGObject(Generic[T]):
         self.streams_used.clear()
         self.total_duration = 0.
         self.total_duration_ts = 0.
+
+    def overlay_stream(self, media: ET.Element) -> tuple[ffmpeg.nodes.FilterableStream, tuple[float, ...]]:
+        streams_dict: dict[str | Literal[0], list[ET.Element]] = {}
+        main_stream_id: str | Literal[0] = None
+
+        for medium in media:
+            id = medium.get('id')
+            parent_id = medium.get('parent')
+            # print(f'<<< {id=}, {parent_id=}, {main_stream_id=}')
+            # 當 parent 為 None
+            if parent_id is None:
+                if id is None:
+                    # 如果 id 和 parent 都是 None，將兩者設為 0
+                    id, parent_id = 0, 0
+                else:
+                    # 如果該 id 值第一次出現，將 parent 設為 0
+                    if id not in streams_dict:
+                        parent_id = 0
+                    else:
+                        # 如果該 id 值已經出現過，將 parent 設為 id 本身
+                        parent_id = id
+            else:
+                # 當 parent 不為 None 且 id 為 None 時，設 id 為 parent
+                if id is None:
+                    id = parent_id
+            if main_stream_id is None and (parent_id == id):
+                main_stream_id = parent_id
+            # print(f'>>> {id=}, {parent_id=}, {main_stream_id=}')
+            streams_dict.setdefault(parent_id, []).append(medium)
+
+        # print(f'{streams_dict=}')
+        # for k, v in streams_dict.items():
+        #     print(f'[{k}] >>>>')
+        #     for e in v:
+        #         print(f'\tpath={e.get("path")}')
+        #         print(f'\tid={e.get("id")}, parent={e.get("parent")}, x={e.get("x")}, y={e.get("y")}')
+
+        stream_id = main_stream_id
+        streams = streams_dict.pop(stream_id)
+        stream, durations = self.create_stream(streams.pop(0), autoscale=False)
+
+        stack = [(stream, {}, streams, stream_id)]
+        while stack:
+            # print('>>>>', stack)
+            stream, attribs, streams, stream_id = stack.pop()
+            # print(f'{streams_dict=}')
+            # print(f'{stream_id=}')
+            # for e in streams:
+            #     print(f'\tpath={e.get("path")}')
+            #     print(f'\tid={e.get("id")}, parent={e.get("parent")}, x={e.get("x")}, y={e.get("y")}')
+            while streams:
+                medium = streams.pop(0)
+                _stream_id = medium.get('id')
+                _attribs = {xi: v for xi in ('x', 'y') if (v := medium.get(xi)) is not None}
+                if _stream_id is None:
+                    _stream_id = stream_id
+                if _stream_id == stream_id:
+                    # print(f'overlaying {medium.get("path")} over {stream}...')
+                    stream = stream.overlay(
+                        self.create_stream(medium, autoscale=False)[0],
+                        **_attribs
+                    )
+                else:
+                    _streams = streams_dict.pop(_stream_id)
+                    _stream = self.create_stream(medium, autoscale=False)[0]
+                    stack.append((stream, attribs, streams, stream_id))
+                    stack.append((_stream, _attribs, _streams, _stream_id))
+                    break
+            else:
+                if stack:
+                    _stream, _attribs, _streams, _stream_id = stack[-1]
+                    stack[-1] = (_stream.overlay(stream, **attribs), _attribs, _streams, _stream_id)
+
+        return (stream, durations)
 
 
 class VideoMeta(TypedDict):

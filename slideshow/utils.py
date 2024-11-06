@@ -113,7 +113,7 @@ def get_logger(
             logger_path = Path('./slideshow.log')
         else:
             logger_path = Path(to_file)
-        handlers.append(logging.FileHandler(logger_path))
+        handlers.append(logging.FileHandler(logger_path.resolve()))
     for handler in handlers:
         logger.addHandler(handler)
         handler.setFormatter(formatter)
@@ -280,7 +280,9 @@ def expand_template(
     return expanded
 
 
-def sampled(dataset: Sequence[T], sample_size: int = 3) -> list[T]:
+def sampled(dataset: Sequence[T], sample_size: Optional[int] = 3) -> list[T]:
+    if sample_size is None:
+        return list(dataset)
     n = len(dataset)
     if sample_size >= n:
         return list(dataset)

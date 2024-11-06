@@ -5,10 +5,14 @@ import dataclasses
 import functools
 import re
 import textwrap
-from typing import Callable, Generic, Iterable, Literal, NamedTuple, Optional, Self, Sequence, TypeAlias, TypeVar, cast
-from .utils import expand_template, get_logger, sampled
+from typing import (
+    Any, Callable, Generic, Iterable, Literal, NamedTuple, Optional, Protocol, Self, Sequence, Type, TypeAlias,
+    TypeVar, cast
+)
 
-logger = get_logger('Slideshow.Sorter')
+from . import utils
+
+logger = utils.get_logger('Slideshow.Sorter')
 
 
 T = TypeVar('T')
@@ -122,7 +126,8 @@ class SimilarImageSorter(Sorter):
         alg: str = 'pixelwise',
         threshold: Optional[float] = None,
         kind: str = 'primary',
-        chunk: Optional[int] = None
+        chunk: Optional[int] = None,
+        target: str = 'score'
     ) -> Self:
         from image_sorter.image_sorter import image_sorted
         sorter_func = functools.partial(
@@ -131,7 +136,8 @@ class SimilarImageSorter(Sorter):
             threshold=threshold,
             kind=kind,
             ret_key=lambda im: im['path'],
-            chunk=chunk
+            chunk=chunk,
+            target=target
         )
         return cls(sorter_func)
 
@@ -142,7 +148,7 @@ class SimilarImageSorter(Sorter):
     ) -> Pair[StrGroups]:
         if ditched is None:
             ditched = StrGroups()
-        kept = StrGroups(map(self.sorter_func, datasets))
+        kept = StrGroups(*map(self.sorter_func, datasets))
         return Pair(kept, ditched)
 
 
@@ -159,10 +165,22 @@ class GroupedSimilarImageSorter(Sorter):
         alg: str = 'pixelwise',
         threshold: Optional[float] = None,
         sample_size: Optional[int] = None,
-        kind: str = 'bruteforce'
+        kind: str = 'bruteforce',
+        target: str = 'score',
+        inverted: bool = False
     ) -> Self:
         from image_sorter.image_sorter import compare_groups
-        return cls(functools.partial(compare_groups, alg=alg, threshold=threshold, kind=kind), sample_size)
+        fn = functools.partial(compare_groups, alg=alg, threshold=threshold, kind=kind, target=target)
+        if not inverted:
+            compare_func = fn
+        else:
+            @functools.wraps(fn)
+            def compare_func(*args, **kwds):
+                return [not x for x in fn(*args, **kwds)]
+        return cls(
+            compare_func,
+            sample_size
+        )
 
     def _separated(
         self,
@@ -183,8 +201,8 @@ class GroupedSimilarImageSorter(Sorter):
             groups_b = datasets[i + 1:]
 
             if self.sample_size is not None:
-                sampled_group_a = sampled(group_a, sample_size=self.sample_size)
-                sampled_groups_b = [sampled(group_b, sample_size=self.sample_size) for group_b in groups_b]
+                sampled_group_a = utils.sampled(group_a, sample_size=self.sample_size)
+                sampled_groups_b = [utils.sampled(group_b, sample_size=self.sample_size) for group_b in groups_b]
             else:
                 sampled_group_a = group_a
                 sampled_groups_b = groups_b
@@ -215,12 +233,22 @@ class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
         alg: str = 'ccip',
         threshold: Optional[float] = None,
         sample_size: Optional[int] = None,
-        kind: str = 'bruteforce'
+        kind: str = 'bruteforce',
+        target: str = 'score',
+        inverted: bool = False
     ) -> Self:
         from image_sorter.image_sorter import compare_groups
 
+        fn = functools.partial(compare_groups, alg=alg, threshold=threshold, kind=kind, target=target)
+        if not inverted:
+            compare_func = fn
+        else:
+            @functools.wraps(fn)
+            def compare_func(*args, **kwds):
+                return [not x for x in fn(*args, **kwds)]
+
         return cls(
-            functools.partial(compare_groups, alg=alg, threshold=threshold, target='score', kind=kind),
+            functools.partial(compare_func, alg=alg, threshold=threshold, kind=kind, target=target),
             sample_size,
             reference=reference
         )
@@ -238,7 +266,7 @@ class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
         groups_b = datasets
 
         sampled_groups_b = [
-            sampled(dataset, sample_size=self.sample_size) if self.sample_size is not None else dataset for dataset in datasets
+            utils.sampled(dataset, sample_size=self.sample_size) if self.sample_size is not None else dataset for dataset in datasets
         ]
 
         _ditched: StrGroups = StrGroups()
@@ -262,87 +290,48 @@ class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
         return out_pair
 
 
-class RegexSorterCoef(NamedTuple):
-    patterns: Optional[tuple[str | Sequence[str], ...]] = None
-    keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None
-    ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None
-    key_fmt: Optional[str] = None
+class GenericPattern(Protocol):
+    class GenericMatch(Protocol):
+        def groups(self) -> tuple[str]:
+            raise NotImplementedError
 
-    def updated(self, p: Self) -> Self:
-        if (patterns := self.patterns) is None:
-            patterns = p.patterns
-        else:
-            assert p.patterns is not None
-            assert all(self.status(pattern) == 'independent' for pattern in p.patterns)
-            pattern_list = []
-            for pattern in patterns:
-                for pattern_p in p.patterns:
-                    match self.status(pattern):
-                        case 'copy':
-                            assert isinstance(pattern_p, str)
-                            pattern_list.append(pattern_p)
-                        case 'dependent':
-                            assert isinstance(pattern_p, str)
-                            pattern_list.append(expand_template(pattern_p, cast(Sequence[str], pattern)))
-                        case 'independent':
-                            pattern_list.append(pattern)
-                            break
-            patterns = tuple(pattern_list)
-
-        if (keep := self.keep) is None:
-            keep = p.keep
-        if (ditch := self.ditch) is None:
-            ditch = p.ditch
-        if (key_fmt := self.key_fmt) is None:
-            key_fmt = p.key_fmt
-        return type(self)(patterns, keep, ditch, key_fmt)
-
-    def updated_by(self, c: Self) -> Self:
-        return c.updated(self)
-
-    @staticmethod
-    def status(pattern: Optional[str | Sequence[str]]) -> Literal['independent', 'dependent', 'copy']:
-        if pattern is None:
-            return 'copy'
-        elif isinstance(pattern, str):
-            return 'independent'
-        return 'dependent'
+    def fullmatch(self, target: str, *targets: str) -> GenericMatch | None:
+        raise NotImplementedError
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
-class RegexSorter(Sorter):
-    patterns: tuple[re.Pattern[str], ...]
+class GenericSorter(Sorter):
+    patterns: tuple[GenericPattern, ...]
     keep: Sequence[Optional[tuple[str, ...]]]
     ditch: Sequence[Optional[tuple[str, ...]]]
     key_fmt: Optional[str]
     _whitelist_only: bool = dataclasses.field(repr=False)
     _match_only: bool = dataclasses.field(repr=False)
     keep_all: bool = dataclasses.field(repr=False)
+    sample_size: Optional[int] = None
+    do_group: bool = False
+
+    @classmethod
+    def _create_patterns(
+        cls,
+        patterns: Iterable[GenericPattern | str],
+        tokens: Optional[Sequence[GenericPattern | str]] = None
+    ) -> list[GenericPattern]:
+        raise NotImplementedError
 
     @classmethod
     def create(
         cls,
-        patterns: Iterable[re.Pattern[str] | str],
+        patterns: Iterable[GenericPattern | str],
         keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None,
         ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None,
         key_fmt: Optional[str] = None,
-        tokens: Optional[Sequence[re.Pattern[str] | str]] = None
+        tokens: Optional[Sequence[GenericPattern | str]] = None,
+        sample_size: Optional[int] = None,
+        do_group: bool = False
     ) -> Self:
 
-        pattern_list: list[re.Pattern[str]] = []
-        for pattern in patterns:
-            if tokens is not None:
-                if not isinstance(pattern, str):
-                    pattern = pattern.pattern
-                pattern = re.compile(
-                    expand_template(
-                        pattern, (t if isinstance(t, str) else t.pattern for t in tokens)
-                    )
-                )
-            elif isinstance(pattern, str):
-                pattern = re.compile(pattern)
-            pattern_list.append(pattern)
-
+        pattern_list = cls._create_patterns(patterns, tokens)
         keep = (None,) if keep is None else tuple(tuple(en) if en is not None else None for en in keep)
         ditch = (None,) if ditch is None else tuple(tuple(en) if en is not None else None for en in ditch)
         assert all(k not in ditch for k in keep if k is not None), 'Ambiguous whether to keep or ditch'
@@ -350,18 +339,31 @@ class RegexSorter(Sorter):
         match_only = any(en is None for en in ditch)
         keep_all = not ditch
 
-        return cls(tuple(pattern_list), keep, ditch, key_fmt, whitelist_only, match_only, keep_all)
+        return cls(
+            tuple(pattern_list), keep, ditch, key_fmt, whitelist_only, match_only, keep_all, sample_size, do_group
+        )
 
-    def _key(self, item: str) -> tuple[str, ...] | Literal['ditch']:
+    def _to_keep(self, k: tuple[str, ...] | None) -> tuple[str, ...] | None | Literal[False]:
+        if k in self.keep:
+            return k
+        return False
+
+    def _to_ditch(self, k: tuple[str, ...] | None) -> bool:
+        return (k in self.ditch)
+
+    def _key(self, item: str, *items: str) -> tuple[str, ...] | Literal['ditch'] | None:
         k = 'ditch'
         for pattern in self.patterns:
-            m = pattern.fullmatch(item)
+            m = pattern.fullmatch(item, *items)
             if m is not None:
-                k = m.groups()
-                if self._whitelist_only and k not in self.keep:
+                g = m.groups()
+                k = self._to_keep(g)
+                if self._whitelist_only and (k is False):
                     k = 'ditch'
-                elif k in self.ditch:
+                elif self._to_ditch(g):
                     k = 'ditch'
+                elif k is False:
+                    k = g
             else:
                 if self._whitelist_only:
                     k = 'ditch'
@@ -387,9 +389,12 @@ class RegexSorter(Sorter):
         if ditched is None:
             ditched = StrGroups([StrGroup()])
         for dataset in datasets:
-            groups = collections.defaultdict(list)
-            for data in dataset:
-                groups[self._key(data)].append(data)
+            groups = collections.defaultdict(StrGroup)
+            if not self.do_group:
+                for data in dataset:
+                    groups[self._key(data)].append(data)
+            else:
+                groups[self._key(*utils.sampled(dataset, self.sample_size))].extend(dataset)
 
             if 'ditch' in groups:
                 ditched[0].extend(groups.pop('ditch'))
@@ -407,6 +412,212 @@ class RegexSorter(Sorter):
                     if start_i == 1:
                         kept.append(groups[()])
         return Pair(kept, ditched)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class GenericSorterCoeff:
+    patterns: Optional[tuple[str | Sequence[str] | Sequence[Sequence[str]], ...]] = None
+    keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None
+    ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None
+    key_fmt: Optional[str] = None
+    sample_size: Optional[int] = None
+    do_group: Optional[bool] = None
+
+    def updated(self, p: Self) -> Self:
+        if (patterns := self.patterns) is None:
+            patterns = p.patterns
+        else:
+            assert p.patterns is not None
+            assert all(self.status(pattern) == 'independent' for pattern in p.patterns)
+            pattern_list = []
+            for pattern in patterns:
+                for pattern_p in p.patterns:
+                    match self.status(pattern):
+                        case 'copy':
+                            assert isinstance(pattern_p, str)
+                            pattern_list.append(pattern_p)
+                        case 'dependent':
+                            assert isinstance(pattern_p, str)
+                            pattern_list.append(utils.expand_template(pattern_p, cast(Sequence[str], pattern)))
+                        case 'independent':
+                            pattern_list.append(pattern)
+                            break
+            patterns = tuple(pattern_list)
+
+        if (keep := self.keep) is None:
+            keep = p.keep
+        if (ditch := self.ditch) is None:
+            ditch = p.ditch
+        if (key_fmt := self.key_fmt) is None:
+            key_fmt = p.key_fmt
+        if (sample_size := self.sample_size) is None:
+            sample_size = p.sample_size
+        if (do_group := self.do_group) is None:
+            do_group = p.do_group
+        return type(self)(patterns, keep, ditch, key_fmt, sample_size, do_group)
+
+    def updated_by(self, c: Self) -> Self:
+        return c.updated(self)
+
+    @classmethod
+    def get_field_names(cls) -> tuple[str, ...]:
+        return tuple(cls.__dataclass_fields__)
+
+    def asdict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @staticmethod
+    def status(pattern: Optional[str | Sequence[str]]) -> Literal['independent', 'dependent', 'copy']:
+        if pattern is None:
+            return 'copy'
+        elif isinstance(pattern, str):
+            return 'independent'
+        return 'dependent'
+
+    @classmethod
+    def get_sorter_cls(cls) -> Type[GenericSorter]:
+        raise NotImplementedError
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class RegexPattern:
+    pattern: re.Pattern[str]
+
+    @dataclasses.dataclass(slots=True, frozen=True)
+    class RegexMatch:
+        _groups: tuple[str, ...]
+
+        def groups(self) -> tuple[str, ...]:
+            return self._groups
+
+    @classmethod
+    def create(cls, pattern: re.Pattern[str]) -> Self:
+        return cls(pattern)
+
+    def fullmatch(self, target: str, *targets: str) -> RegexMatch | None:
+        m = self.pattern.fullmatch(target)
+        if m is None:
+            return None
+        groups = m.groups()
+        for t in targets:
+            m = self.pattern.fullmatch(t)
+            if m is None:
+                return None
+            if groups != m.groups():
+                return None
+        return self.RegexMatch(groups)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class RegexSorter(GenericSorter):
+    @classmethod
+    def _create_patterns(
+        cls,
+        patterns: Iterable[RegexPattern | str],
+        tokens: Optional[Sequence[re.Pattern[str] | str]] = None
+    ) -> list[RegexPattern]:
+        pattern_list: list[RegexPattern] = []
+        for pattern in patterns:
+            if tokens is not None:
+                p = pattern.pattern.pattern if not isinstance(pattern, str) else pattern
+                re_pattern = re.compile(
+                    utils.expand_template(
+                        p, (t if isinstance(t, str) else t.pattern for t in tokens)
+                    )
+                )
+                pattern = RegexPattern.create(re_pattern)
+            elif isinstance(pattern, str):
+                re_pattern = re.compile(pattern)
+                pattern = RegexPattern.create(re_pattern)
+            pattern_list.append(pattern)
+        return pattern_list
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class RegexSorterCoeff(GenericSorterCoeff):
+    @classmethod
+    def get_sorter_cls(cls) -> Type[RegexSorter]:
+        return RegexSorter
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ImageTagPattern:
+    _fn: Callable[[str], set[str]]
+
+    @dataclasses.dataclass(slots=True, frozen=True)
+    class ImageTagMatch:
+        _groups: tuple[str, ...]
+
+        def groups(self) -> tuple[str, ...]:
+            return self._groups
+
+    @classmethod
+    def create(cls, models: Sequence[str | None]) -> Self:
+        from image_sorter.image_tagging import get_image_tagger
+        return cls(get_image_tagger(models))
+
+    def fullmatch(self, target: str, *targets: str) -> ImageTagMatch | None:
+        m = self._fn(target)
+        m.update(*(self._fn(t) for t in targets))
+        if not m:
+            return None
+        return self.ImageTagMatch(tuple(m))
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ImageGroupTagSorter(GenericSorter):
+    @classmethod
+    def _create_patterns(
+        cls,
+        patterns: Iterable[ImageTagPattern | Iterable[str] | None],
+        tokens: Literal[None] = None
+    ) -> list[ImageTagPattern]:
+        assert tokens is None
+        return [p if isinstance(p, ImageTagPattern) else ImageTagPattern.create(tuple(p) if p is not None else (None,)) for p in patterns]
+
+    def _to_keep(self, k: tuple[str, ...] | None) -> tuple[str, ...] | None | Literal[False]:
+        assert k is not None
+        for _k in self.keep:
+            if _k is None:
+                return None
+            if set(_k).issubset(k):
+                return _k
+        return False
+
+    def _to_ditch(self, k: tuple[str, ...] | None) -> bool:
+        assert k is not None
+        for _k in self.ditch:
+            if _k is None:
+                continue
+            if set(_k).issubset(k):
+                return True
+        return False
+
+    @classmethod
+    def create(
+        cls,
+        patterns: Iterable[ImageTagPattern | Iterable[str]],
+        keep: Optional[Sequence[tuple[str, ...] | None]] = None,
+        ditch: Optional[Sequence[tuple[str, ...] | None]] = None,
+        key_fmt: Optional[str] = None,
+        tokens: Optional[Sequence[GenericPattern | str]] = None,
+        sample_size: Optional[int] = None,
+        do_group: bool = False
+    ) -> Self:
+        assert key_fmt is None
+        assert tokens is None
+        return super(ImageGroupTagSorter, cls).create(
+            patterns, keep, ditch, key_fmt, tokens, sample_size=sample_size, do_group=do_group
+        )
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ImageGroupTagSorterCoeff(GenericSorterCoeff):
+    sample_size: Optional[int] = None
+
+    @classmethod
+    def get_sorter_cls(cls) -> Type[ImageGroupTagSorter]:
+        return ImageGroupTagSorter
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

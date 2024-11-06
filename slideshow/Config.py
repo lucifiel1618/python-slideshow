@@ -9,10 +9,10 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Self, S
 
 import yaml
 
-from .utils import get_logger
-from .Sorter import FuturePair, GroupedSimilarImageFilter, GroupedSimilarImageSorter, Pair, SimilarImageSorter, Sorter, RegexSorter, RegexSorterCoef, SorterChain, StrGroup, collect_futures
+from . import utils
+from .Sorter import FuturePair, GroupedSimilarImageFilter, GroupedSimilarImageSorter, ImageGroupTagSorterCoeff, Pair, RegexSorterCoeff, SimilarImageSorter, Sorter, RegexSorter, GenericSorterCoeff, SorterChain, StrGroup, collect_futures
 
-logger = get_logger('Slideshow.Config')
+logger = utils.get_logger('Slideshow.Config')
 
 
 @dataclasses.dataclass(slots=True)
@@ -23,7 +23,7 @@ class Node:
 
 @dataclasses.dataclass(slots=True)
 class Domain(Node):
-    _sorters: list[None | Sorter | RegexSorterCoef] = dataclasses.field(default_factory=list)
+    _sorters: list[None | Sorter | GenericSorterCoeff] = dataclasses.field(default_factory=list)
     meta: list[str] = dataclasses.field(default_factory=list)
 
     def get_sorter(self, i) -> Sorter:
@@ -31,7 +31,8 @@ class Domain(Node):
         if sorter is None:
             assert self.parent is not None
             return self.parent.get_sorter(i)
-        elif isinstance(sorter, RegexSorterCoef):
+        elif isinstance(sorter, GenericSorterCoeff):
+            sorter_cls = sorter.__class__
             coeffs = [sorter]
             n = self
             while n.parent is not None:
@@ -40,9 +41,8 @@ class Domain(Node):
                     coeffs.append(n._sorters[i])
                 except IndexError:
                     pass
-            sorter = RegexSorter.create(
-                **functools.reduce(RegexSorterCoef.updated_by, reversed(coeffs))._asdict()
-            )
+            kwds = functools.reduce(sorter_cls.updated_by, reversed(coeffs)).asdict()
+            sorter = sorter_cls.get_sorter_cls().create(**kwds)
         return sorter
 
     def get_sorter_chain(self) -> SorterChain:
@@ -158,7 +158,7 @@ class ConfigReader:
                     n = Domain('ditch')
                     ditches.append(n)
 
-            n._sorters.append(RegexSorterCoef(pattern=tuple(patterns)))
+            n._sorters.append(GenericSorterCoeff(patterns=tuple(patterns)))
 
             if sorter is not None:
                 n._sorters.append(sorter)
@@ -194,17 +194,21 @@ class ConfigReader:
 
             for p in cls.get_group(en, []):
                 sorter_type: str | None = p.pop('type')
-                if sorter_type == 'path':
-                    patterns = p['pattern']
+                if sorter_type in ('path', 'image_tags', 'image_group_tags'):
+                    patterns = p.get('pattern', None)
                     if isinstance(patterns, str) or patterns is None:
-                        patterns = [patterns]
+                        patterns = (patterns,)
                     else:
-                        patterns = [(p,) if isinstance(p, str) else p for p in patterns]
+                        patterns = tuple((p,) if isinstance(p, str) else p for p in patterns)
 
                     keep = cls.container_fmt(p.get('keep', None))
                     ditch = cls.container_fmt(p.get('ditch', None))
-                    args = [p[f] for f in RegexSorterCoef._fields[3:] if f in p]
-                    n._sorters.append(RegexSorterCoef(tuple(patterns), keep, ditch, *args))
+                    if sorter_type == 'path':
+                        coef_cls = RegexSorterCoeff
+                    elif sorter_type in ('image_tags', 'image_group_tags'):
+                        coef_cls = ImageGroupTagSorterCoeff
+                    kwds = {f: p[f] for f in coef_cls.get_field_names()[3:] if f in p}
+                    n._sorters.append(coef_cls(patterns, keep, ditch, **kwds))
                 else:
                     if sorter_type == 'image':
                         n._sorters.append(SimilarImageSorter.create(**p))

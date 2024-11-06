@@ -82,6 +82,9 @@ def main() -> None:
                                         activate to auto-generate a template maker')
             backend_parser.add_argument('--maker-options', default=[], action='append',
                                         help='template maker options. e.g. pattern:<title>, pattern:id=:<id>.')
+        else:
+            backend_parser.add_argument('--list-files', action='store_true',
+                                        help='list all files in the album file without running anything.')
 
     try:
         import argcomplete

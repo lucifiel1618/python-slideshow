@@ -1,6 +1,7 @@
+import copy
 import os
 from xml.etree import ElementTree as ET
-from itertools import cycle, chain
+from itertools import cycle, chain, product
 from pathlib import Path
 from zipfile import ZipFile
 import tempfile
@@ -120,7 +121,7 @@ class AlbumReader:
         logger.detail(f'Reading media file: `{arg}`')
         if ret_fname:
             return arg
-        return ET.Element(tag, path=arg, media_type=media_type, attrib={}, **stat)
+        return ET.Element(tag, path=arg, media_type=media_type, attrib=stat)
 
     @overload
     @staticmethod
@@ -170,8 +171,8 @@ class AlbumReader:
                 #     for item in AlbumReader._read_dir(d, skip_albumfile = skip_albumfile, ret_fname = ret_fname):
                 #         yield item
                 for f in (os.path.join(root, f) for f in files):
-                    if AlbumReader._get_media_type(f) in ('image', 'animation', 'video'):
-                        yield AlbumReader._read_image(f, ret_fname=ret_fname)
+                    if (media_type := AlbumReader._get_media_type(f)) in ('image', 'animation', 'video'):
+                        yield AlbumReader._read_image(f, ret_fname=ret_fname, media_type=media_type)
         logger.info('End loading files in directory...')
 
     @staticmethod
@@ -249,6 +250,7 @@ class AlbumReader:
         if id is not None:
             pat = f'{root}/{tag}[@id="{id}"]'
             chapters = album.find(pat)
+            assert chapters is not None
         else:
             pat = f'{root}/{tag}'
             chapters = album.findall(pat)
@@ -279,14 +281,37 @@ class AlbumReader:
                 yield from AlbumReader._get_tag(el.get('id'), el.get('source', album), directory)
             elif el.tag == 'overlay':
                 logger.info('Reading an overlay object ["{}"]'.format(chapter.get('id', '')))
-                el.extend(AlbumReader._read_text(el.text, directory, archive=el.get('archive', None)))
-                yield el
+                yield from AlbumReader._read_overlay(el, directory, album)
             else:
                 yield el
 
     @staticmethod
+    def _read_overlay(
+        el: ET.Element, directory: str = '', album: Optional[ET.Element] = None
+    ) -> Iterator[ET.Element]:
+        last_layers = tuple(AlbumReader._read_text(el.text, directory, archive=el.get('archive', None)))
+        layers_stack = product(*(
+            AlbumReader._read_text(el_sub.text, directory, archive=el.get('archive', None), attribs=el_sub.attrib)
+            for el_sub in el if el_sub.tag == 'layer'
+        ))
+        # print(list((_el_sub, _el_sub.tag, _el_sub.text) for _el_sub in el if _el_sub.tag == 'layer'))
+        try:
+            layers = next(layers_stack)
+            tag = el.tag
+            attribs = el.attrib
+            for layers in chain((layers,), layers_stack):
+                _el = ET.Element(tag, attrib=attribs)
+                _el.extend(layers)
+                _el.extend(last_layers)
+                # print(*((el_sub, el_sub.tag, el_sub.get('path', None)) for el_sub in _el))
+                yield _el
+        except StopIteration:
+            el.extend(last_layers)
+            yield el
+
+    @staticmethod
     def _read_text(
-        arg: str, directory: str, archive: Optional[Path | str] = None
+        arg: str, directory: str, archive: Optional[Path | str] = None, attribs: dict | None = None
     ) -> Iterator[ET.Element]:
         file_reader = FileReader(archive)
         for l in map(str.strip, arg.splitlines()):
@@ -300,10 +325,10 @@ class AlbumReader:
                         l = file_reader.read(l)
                         yield from AlbumReader._read_dir(l, ret_fname=False)
                     else:
-                        stat: dict[str, str] = {}
+                        stat: dict[str, str | None] = {} if attribs is None else attribs.copy()
                         if l.endswith(']'):
                             path, _stat = l.rsplit(' [', 1)
-                            stat = eval(f'dict({_stat[:-1]})')
+                            stat.update(eval(f'dict({_stat[:-1]})'))
                         else:
                             path = l
                         media_type = AlbumReader._get_media_type(path)
@@ -473,9 +498,7 @@ def iomap(
         else:
             assert IN.suffix == '.album'
             album = IN
-        for chapter in AlbumReader._get_items_of_tag(
-            None, album, root='body'
-        ):
+        for chapter in AlbumReader._get_items_of_tag( None, album, root='body'):
             chapter_id = chapter.get('id', None)
             if chapter_id is not None:
                 chapters.append(chapter_id)
