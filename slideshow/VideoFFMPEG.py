@@ -25,7 +25,7 @@ def _ffmpeg_read(
     size: tuple[int, int],
     fps: Optional[int] = 30,
     parent: Optional[object] = None,
-    max_streams: int = 50, #100,  # 200,
+    max_streams: int = 50,  #100, 200,
     dryrun: bool = False
 ) -> None:
     ffmpeg_object = FFMPEGObject.FFMPEGObjectOutput(delay, size, fps, rate)
@@ -42,14 +42,14 @@ def _ffmpeg_read(
                 continue
             ffmpeg_object.add_stream(media)
             if len(ffmpeg_object.streams) >= max_streams:
-                subfile = temp_output.with_suffix(f'.part{len(subfiles)+1}{temp_output.suffix}')
+                subfile = temp_output.with_suffix(f'.part{len(subfiles) + 1}{temp_output.suffix}')
                 ffmpeg_object.run(subfile)
                 subfiles.append(str(subfile))
                 ffmpeg_object.reset()
 
         if ffmpeg_object.streams:
             if subfiles:
-                subfile = temp_output.with_suffix(f'.part{len(subfiles)+1}{temp_output.suffix}')
+                subfile = temp_output.with_suffix(f'.part{len(subfiles) + 1}{temp_output.suffix}')
                 ffmpeg_object.run(subfile)
                 subfiles.append(str(subfile))
             else:

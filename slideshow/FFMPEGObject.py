@@ -289,10 +289,13 @@ class FFMPEGObject(Generic[T]):
         fname: str,
         outstream: ffmpeg.nodes.FilterableStream,
         temp_fname: Optional[str] = None,
-        callback: Optional[Callable[[str], T]] = None
+        callback: Optional[Callable[[str], T]] = None,
+        *,
+        logger=None
     ) -> T | None:
         _fname = temp_fname if temp_fname is not None else fname
-        logger.detail(shlex.join(outstream.compile()))
+        if logger is not None:
+            logger.detail(shlex.join(outstream.compile()))
         outstream.run(cmd=FFMPEG_BIN, overwrite_output=True)  # type: ignore
         if temp_fname is not None:
             shutil.move(_fname, fname)
@@ -306,7 +309,9 @@ class FFMPEGObject(Generic[T]):
     def compile_call(
         self,
         path: Path,
-        temp_path: Optional[Path] = None
+        temp_path: Optional[Path] = None,
+        *,
+        logger=None
     ) -> Callable[[], T]:
         _path = temp_path if temp_path is not None else path
         fname = str(path)
@@ -315,7 +320,7 @@ class FFMPEGObject(Generic[T]):
         callback = self.callback
         self.logger.detail(f'Prepare {fname}')
         f: Callable[[], T] = functools.partial(
-            self._compile_call, fname, outstream, temp_fname, callback
+            self._compile_call, fname, outstream, temp_fname, callback, logger=logger
         )  # type: ignore
         return f
 
