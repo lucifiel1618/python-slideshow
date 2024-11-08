@@ -160,8 +160,8 @@ def main() -> None:
         )
         if PER_CHAPTER:
             maxl_chapters = max(len(c) for c in chapters)
-            maxl_outpus = max(len(str(o)) for o in outputs)
-            en_fmt = f'{{:<{maxl_chapters}}}:{{:<{maxl_outpus}}}'
+            maxl_outputs = max(len(str(o)) for o in outputs)
+            en_fmt = f'{{:<{maxl_chapters}}}:{{:<{maxl_outputs}}}'
         for output, chapter in zip(outputs, chapters):
             if PER_CHAPTER:
                 logger.debug(en_fmt.format(chapter, str(output)))

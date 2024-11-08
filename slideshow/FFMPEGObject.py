@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 from xml.etree import ElementTree as ET
 from pathlib import Path
@@ -209,7 +210,7 @@ class FFMPEGObject(Generic[T]):
         if autoscale:
             stream = (
                 stream.filter('scale', *size, force_original_aspect_ratio='decrease')  # type: ignore
-                      .filter('pad', *size, '(ow-iw)/2')
+                      .filter('pad', *size, '(ow-iw)/2', '(oh-ih)/2')
             )
         stream = (
             stream.filter('setsar', '1')  # type: ignore
@@ -228,7 +229,7 @@ class FFMPEGObject(Generic[T]):
             if autoscale:
                 stream = (
                     stream.filter('scale', *self.size, force_original_aspect_ratio='decrease')  # type: ignore
-                          .filter('pad', *self.size, '(ow-iw)/2')
+                          .filter('pad', *self.size, '(ow-iw)/2', '(oh-ih)/2')
                 )
                 stream = (
                     stream.filter('setsar', '1')  # type: ignore
@@ -291,7 +292,7 @@ class FFMPEGObject(Generic[T]):
         callback: Optional[Callable[[str], T]] = None
     ) -> T | None:
         _fname = temp_fname if temp_fname is not None else fname
-        # print(*outstream.compile())
+        logger.detail(shlex.join(outstream.compile()))
         outstream.run(cmd=FFMPEG_BIN, overwrite_output=True)  # type: ignore
         if temp_fname is not None:
             shutil.move(_fname, fname)

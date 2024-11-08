@@ -280,7 +280,7 @@ class AlbumReader:
                 logger.info('Reading files from another predefined chapter')
                 yield from AlbumReader._get_tag(el.get('id'), el.get('source', album), directory)
             elif el.tag == 'overlay':
-                logger.info('Reading an overlay object ["{}"]'.format(chapter.get('id', '')))
+                logger.detail('Reading an overlay object ["{}"]'.format(chapter.get('id', '')))
                 yield from AlbumReader._read_overlay(el, directory, album)
             else:
                 yield el
