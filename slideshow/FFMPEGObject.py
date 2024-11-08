@@ -331,6 +331,29 @@ class FFMPEGObject(Generic[T]):
         self.total_duration = 0.
         self.total_duration_ts = 0.
 
+    def _overlay(
+        self,
+        m1: ffmpeg.nodes.FilterableStream,
+        m2: ffmpeg.nodes.FilterableStream,
+        x: str = '0',
+        y: str = '0'
+    ) -> ffmpeg.nodes.FilterableStream:
+        oversized = False
+        if x != '0':
+            oversized |= eval(f'({x} - W) >= 0', dict(w=1, W=1))
+        if y != '0':
+            oversized |= eval(f'({y} - H) >= 0', dict(h=1, H=1))
+        if not oversized:
+            return m1.overlay(m2, x=x, y=y)
+        n = m2.node
+        while not isinstance(n, ffmpeg.nodes.InputNode):
+            n = next(iter(n.incoming_edge_map.values()))[0]
+        meta2 = self.probe(n.kwargs['filename'])['streams'][0]
+        w: str = '0' if x is None else ('{}'.format(eval(f'str({x})+"+"+str(w)', dict(w=meta2['width'], W='iw'))))  # eval('W+str(w)') = 'iw' + str(w)
+        h: str = '0' if y is None else ('{}'.format(eval(f'str({y})+"+"+str(h)', dict(h=meta2['height'], H='ih'))))
+        stream = m1.filter('pad', w=w, h=h)
+        return stream.overlay(m2, x='W-w', y='H-h')
+
     def overlay_stream(self, media: ET.Element) -> tuple[ffmpeg.nodes.FilterableStream, tuple[float, ...]]:
         streams_dict: dict[str | Literal[0], list[ET.Element]] = {}
         main_stream_id: str | Literal[0] = None
@@ -338,7 +361,6 @@ class FFMPEGObject(Generic[T]):
         for medium in media:
             id = medium.get('id')
             parent_id = medium.get('parent')
-            # print(f'<<< {id=}, {parent_id=}, {main_stream_id=}')
             # 當 parent 為 None
             if parent_id is None:
                 if id is None:
@@ -357,15 +379,7 @@ class FFMPEGObject(Generic[T]):
                     id = parent_id
             if main_stream_id is None and (parent_id == id):
                 main_stream_id = parent_id
-            # print(f'>>> {id=}, {parent_id=}, {main_stream_id=}')
             streams_dict.setdefault(parent_id, []).append(medium)
-
-        # print(f'{streams_dict=}')
-        # for k, v in streams_dict.items():
-        #     print(f'[{k}] >>>>')
-        #     for e in v:
-        #         print(f'\tpath={e.get("path")}')
-        #         print(f'\tid={e.get("id")}, parent={e.get("parent")}, x={e.get("x")}, y={e.get("y")}')
 
         stream_id = main_stream_id
         streams = streams_dict.pop(stream_id)
@@ -373,13 +387,7 @@ class FFMPEGObject(Generic[T]):
 
         stack = [(stream, {}, streams, stream_id)]
         while stack:
-            # print('>>>>', stack)
             stream, attribs, streams, stream_id = stack.pop()
-            # print(f'{streams_dict=}')
-            # print(f'{stream_id=}')
-            # for e in streams:
-            #     print(f'\tpath={e.get("path")}')
-            #     print(f'\tid={e.get("id")}, parent={e.get("parent")}, x={e.get("x")}, y={e.get("y")}')
             while streams:
                 medium = streams.pop(0)
                 _stream_id = medium.get('id')
@@ -387,8 +395,8 @@ class FFMPEGObject(Generic[T]):
                 if _stream_id is None:
                     _stream_id = stream_id
                 if _stream_id == stream_id:
-                    # print(f'overlaying {medium.get("path")} over {stream}...')
-                    stream = stream.overlay(
+                    stream = self._overlay(
+                        stream,
                         self.create_stream(medium, autoscale=False)[0],
                         **_attribs
                     )
@@ -401,7 +409,7 @@ class FFMPEGObject(Generic[T]):
             else:
                 if stack:
                     _stream, _attribs, _streams, _stream_id = stack[-1]
-                    stack[-1] = (_stream.overlay(stream, **attribs), _attribs, _streams, _stream_id)
+                    stack[-1] = (self._overlay(_stream, stream, **attribs), _attribs, _streams, _stream_id)
 
         return (stream, durations)
 
