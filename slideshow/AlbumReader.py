@@ -1,4 +1,3 @@
-import copy
 import os
 from xml.etree import ElementTree as ET
 from itertools import cycle, chain, product
@@ -10,6 +9,7 @@ import unicodedata
 from typing import Callable, Iterable, Iterator, Literal, Sequence, Optional, overload
 from . import Config
 from .utils import get_logger, AspectEstimator
+from .Sorter import Element
 
 logger = get_logger('slideshow.AlbumReader')
 # logger.setLevel(40)
@@ -304,6 +304,8 @@ class AlbumReader:
                 _el.extend(layers)
                 _el.extend(last_layers)
                 # print(*((el_sub, el_sub.tag, el_sub.get('path', None)) for el_sub in _el))
+                # for layer in layers:
+                #     print(f'{layer.tag=}, {layer.attrib=}')
                 yield _el
         except StopIteration:
             el.extend(last_layers)
@@ -415,14 +417,14 @@ class AlbumReader:
 
         aspect_estimator = AspectEstimator(0.1, default_aspect=aspect)
 
-        def callback(f: str) -> str:
-            aspect_estimator.add_sample_aspect(f)
-            mime = AlbumReader._get_media_type(f)
-            pat = '{}'
+        def callback(e: Element) -> str:
+            aspect_estimator.add_sample_aspect(e.path)
+            mime = AlbumReader._get_media_type(e.path)
+            extra_str = None
             if mime in ('video', 'audio', 'animation'):
                 if repeat_video is not None:
-                    pat = f'{{}} [repeat={repeat_video}]'
-            return pat.format(f)
+                    extra_str = f' [repeat={repeat_video}]'
+            return e.as_str(path_extra=extra_str)
 
         dataset = AlbumReader._read_dir(str(path), True, ret_fname=True, softlink_albumfile=True) if not empty else []
         d = config.process(dataset=map(os.path.relpath, dataset), callback=callback)

@@ -10,8 +10,9 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Self, S
 import yaml
 
 from . import utils
-from .Sorter import FuturePair, GroupedSimilarImageFilter, GroupedSimilarImageSorter, ImageGroupTagSorterCoeff, Pair, RegexSorterCoeff, SimilarImageSorter, Sorter, RegexSorter, GenericSorterCoeff, SorterChain, StrGroup, collect_futures
-
+from .Sorter import (
+    Element, ElementGroup, FuturePair, GroupedSimilarImageFilter, GroupedSimilarImageSorter, ImageGroupTagSorterCoeff, Pair, RegexSorterCoeff, SimilarImageSorter, Sorter, GenericSorterCoeff, SorterChain, StrGroup, as_elements, collect_futures
+)
 logger = utils.get_logger('Slideshow.Config')
 
 
@@ -49,12 +50,12 @@ class Domain(Node):
         n = len(self._sorters)
         return SorterChain([self.get_sorter(i) for i in range(n)])
 
-    def separated(self, dataset: Iterable[str]) -> Pair[StrGroup]:
+    def separated(self, dataset: Iterable[Element]) -> Pair[ElementGroup]:
         return self.get_sorter_chain().separated(dataset)
 
-    def separated_async(self, ft_in: Future[StrGroup], executor: ThreadPoolExecutor) -> FuturePair[StrGroup]:
+    def separated_async(self, ft_in: Future[ElementGroup], executor: ThreadPoolExecutor) -> FuturePair[ElementGroup]:
         ft_d = ft_in
-        fts_k: list[Future[StrGroup]] = []
+        fts_k: list[Future[ElementGroup]] = []
         for e in self.elements[1:]:
             ft_k, ft_d = e.separated_async(ft_d, executor=executor)
             fts_k.append(ft_k)
@@ -203,11 +204,13 @@ class ConfigReader:
 
                     keep = cls.container_fmt(p.get('keep', None))
                     ditch = cls.container_fmt(p.get('ditch', None))
-                    if sorter_type == 'path':
+                    if sorter_type in ('path', 'path_group'):
                         coef_cls = RegexSorterCoeff
                     elif sorter_type in ('image_tags', 'image_group_tags'):
                         coef_cls = ImageGroupTagSorterCoeff
+                    do_group = '_group' in sorter_type
                     kwds = {f: p[f] for f in coef_cls.get_field_names()[3:] if f in p}
+                    kwds.setdefault('do_group', do_group)
                     n._sorters.append(coef_cls(patterns, keep, ditch, **kwds))
                 else:
                     if sorter_type == 'image':
@@ -225,42 +228,45 @@ class ConfigReader:
         return cls(header, _global, chapters, ditches)
 
     def process(
-        self, dataset: Iterable[str], callback: Optional[Callable[[str], str]] = None
+        self, dataset: Iterable[str], callback: Optional[Callable[[Element], str]] = None
     ) -> dict[str, StrGroup]:
         result: dict[str, StrGroup] = collections.defaultdict(list)
 
+        if callback is None:
+            callback = lambda e: e.as_str()
+
         # Collect data to be kept
-        ditched = StrGroup(dataset)
+        ditched = ElementGroup(as_elements(dataset))
         for ch in self.chapters:
             logger.info(f'Start processing Chapter("{ch.id}")...')
             kept, ditched = ch.separated(ditched)
-            if callback is not None:
-                kept = map(callback, kept)
-            result[ch.id].extend(kept)
+            result[ch.id].extend(map(callback, kept))
 
         # Collect data to be ditched
         kept = ditched
 
         for ch in self.ditches:
+            logger.info(f'Start processing Chapter("{ch.id}")...')
             ditched, kept = ch.separated(kept)
-        if callback is not None:
-            kept = map(callback, kept)
-        result['@body'].extend(kept)
+        result['@body'].extend(map(callback, kept))
         for en in result['@body']:
             logger.debug(f'Secured uncaptured file: {en}')
 
         return result
 
     def process_async(
-        self, dataset: Iterable[str], callback: Optional[Callable[[str], str]] = None
+        self, dataset: Iterable[str], callback: Optional[Callable[[Element], str]] = None
     ) -> dict[str, StrGroup]:
         result: dict[str, StrGroup] = collections.defaultdict(StrGroup)
+
+        if callback is None:
+            callback = lambda e: e.as_str()
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             # Collect data to be kept
             ft_d = Future()
-            ft_d.set_result(StrGroup(dataset))
-            tasks: list[Future[StrGroup]] = []
+            ft_d.set_result(ElementGroup(as_elements(dataset)))
+            tasks: list[Future[ElementGroup]] = []
             for ch in self.chapters:
                 logger.info(f'Processing Chapter("{ch.id}")')
                 ft_k, ft_d = ch.separated_async(ft_d, executor=executor)
@@ -268,9 +274,7 @@ class ConfigReader:
             for ch, task in zip(self.chapters, tasks):
                 logger.info(f'Collecting results in Chapter("{ch.id}")')
                 k = task.result()
-                if callback is not None:
-                    k = map(callback, k)
-                result[ch.id].extend(k)
+                result[ch.id].extend(map(callback, k))
             tasks.clear()
             # Collect data to be ditched
             ft_k = ft_d
@@ -280,9 +284,7 @@ class ConfigReader:
             result['@body']
             for ch, task in zip(self.ditches, tasks):
                 k = task.result()
-                if callback is not None:
-                    k = map(callback, k)
-                result['@body'].extend(k)
+                result['@body'].extend(map(callback, k))
 
         return result
 
@@ -293,9 +295,7 @@ class ConfigReader:
         except KeyError as e:
             try:
                 logger.warning(
-                    DeprecationWarning(
-                        'Use of `path` instead of `group` has been deprecated.'
-                    )
+                    DeprecationWarning('Use of `path` instead of `group` has been deprecated.')
                 )
                 g = en['path']
             except KeyError:

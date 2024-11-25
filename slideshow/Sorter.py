@@ -6,8 +6,8 @@ import functools
 import re
 import textwrap
 from typing import (
-    Any, Callable, Generic, Iterable, Literal, NamedTuple, Optional, Protocol, Self, Sequence, Type, TypeAlias,
-    TypeVar, cast
+    Any, Callable, Iterable, Iterator, Literal, NamedTuple, Optional, Protocol, Self, Sequence, Type, TypeAlias,
+    cast
 )
 
 from . import utils
@@ -15,17 +15,59 @@ from . import utils
 logger = utils.get_logger('Slideshow.Sorter')
 
 
-T = TypeVar('T')
 StrGroup: TypeAlias = list[str]
 StrGroups: TypeAlias = list[StrGroup]
 
 
-class Pair(NamedTuple, Generic[T]):
+@dataclasses.dataclass
+class Meta:
+    value: Any
+    _: dataclasses.KW_ONLY
+    _is_first: bool = dataclasses.field(default=True, repr=False)
+
+
+@dataclasses.dataclass
+class Element:
+    path: str
+    _: dataclasses.KW_ONLY
+    _meta: dict['Sorter', dict[str, Meta]] = dataclasses.field(default_factory=dict, repr=False)
+
+    def set(self, sorter: 'Sorter', **meta: Any):
+        if sorter in self._meta:
+            for k, v in meta.items():
+                if k in self._meta[sorter]:
+                    self._meta[sorter][k].value = v
+                else:
+                    self._meta[sorter][k] = Meta(v)
+        else:
+            self._meta[sorter] = {}
+            self.set(sorter, **meta)
+
+    def get(self, sorter: 'Sorter', key: str) -> Any:
+        return self._meta[sorter][key].value
+
+    def as_strdict(self) -> dict[str, str]:
+        meta_str = '; '.join(meta for sorter in self._meta if (meta := sorter.meta_str(self)) is not None)
+        return {'path': self.path, 'meta': f' # \\\\ {meta_str}' if meta_str else ''}
+
+    def as_str(self, path_extra: Optional[str] = None) -> str:
+        if path_extra is None:
+            path_extra = ''
+        if len(self._meta.keys()) != 3:
+            print(f'{self._meta=}')
+        return '{path}{path_extra}{meta}'.format(path_extra=path_extra, **self.as_strdict())
+
+
+ElementGroup: TypeAlias = list[Element]
+ElementGroups: TypeAlias = list[ElementGroup]
+
+
+class Pair[T](NamedTuple):
     k: T
     d: T
 
 
-class FuturePair(Pair[Future[T]]):
+class FuturePair[T](Pair[Future[T]]):
     @classmethod
     def create(
         cls,
@@ -48,14 +90,14 @@ class FuturePair(Pair[Future[T]]):
         return cls(k, d)
 
 
-def collect_futures(*fts_in: Future[Sequence[T]]) -> list[T]:
+def collect_futures[T](*fts_in: Future[Sequence[T]]) -> list[T]:
     result: list[T] = []
     for ft in fts_in:
         result.extend(ft.result())
     return result
 
 
-def flatten_futures(*fts_in: Future[Sequence[Sequence[T]]]) -> Sequence[T]:
+def flatten_futures[T](*fts_in: Future[Sequence[Sequence[T]]]) -> Sequence[T]:
     result: list[T] = []
     for ft in fts_in:
         for g in ft.result():
@@ -63,26 +105,78 @@ def flatten_futures(*fts_in: Future[Sequence[Sequence[T]]]) -> Sequence[T]:
     return result
 
 
-def wrap_future(ft: Future[T]) -> Sequence[T]:
+def wrap_future[T](ft: Future[T]) -> Sequence[T]:
     result = [ft.result()]
     return result
+
+
+def assign_elements(sorter: 'Sorter', es: Iterable[Element], force: Optional[bool] = None, **meta: Any) -> None:
+    '''
+    Note that meta address is shared among assigned elements
+    '''
+    es = iter(es)
+    try:
+        e = next(es)
+    except StopIteration:
+        return
+    try:
+        _meta = e._meta[sorter]
+    except KeyError:
+        force = True
+        e.set(sorter)
+        _meta = e._meta[sorter]
+    for k, v in meta.items():
+        _force = force
+        if k not in _meta:
+            if _force is None:
+                _force = True
+            e.set(sorter, k=v)
+        else:
+            if _force is None:
+                _force = _meta[k]._is_first
+            _meta[k]._is_first = False
+        if _force:
+            for _e in es:
+                _e._meta.setdefault(sorter, {}).update({k: _meta[k]})
+
+
+def as_elements(es: Iterable[str] | Iterable[Element]) -> Iterator[Element]:
+    es = iter(es)
+    try:
+        e = next(es)
+    except StopIteration:
+        return
+    if not isinstance(e, Element):
+        yield Element(e)
+        for e in cast(Iterator[str], es):
+            yield Element(e)
+    else:
+        yield e
+        yield from cast(Iterator[Element], es)
 
 
 class Sorter:
     @property
     @abc.abstractmethod
     def keep_all(self) -> bool:
+        raise NotImplementedError
+
+    def assign_elements(self, es: Iterable[Element], **meta: Any) -> None:
+        assign_elements(self, es, **meta)
+
+    @abc.abstractmethod
+    def meta_str(self, e: Element) -> str | None:
         ...
 
     @abc.abstractmethod
     def _separated(
         self,
-        datasets: Iterable[Iterable[str]],
-        ditched: Optional[Iterable[Iterable[str]]] = None
-    ) -> Pair[StrGroups]:
+        datasets: ElementGroups,
+        ditched: Optional[ElementGroups] = None
+    ) -> Pair[ElementGroups]:
         ...
 
-    def _separated_ft(self, fts_in: FuturePair[StrGroups], fts_out: FuturePair[StrGroups]) -> None:
+    def _separated_ft(self, fts_in: FuturePair[ElementGroups], fts_out: FuturePair[ElementGroups]) -> None:
         d_in = fts_in.d.result()
         if self.keep_all:
             fts_out.d.set_result(d_in)
@@ -94,16 +188,16 @@ class Sorter:
 
     def _separated_async(
         self,
-        fts_in: FuturePair[StrGroups],
+        fts_in: FuturePair[ElementGroups],
         executor: ThreadPoolExecutor
-    ) -> FuturePair[StrGroups]:
-        fts_out: FuturePair[StrGroups] = FuturePair.create()
+    ) -> FuturePair[ElementGroups]:
+        fts_out: FuturePair[ElementGroups] = FuturePair.create()
         executor.submit(self._separated_ft, fts_in, fts_out)
         return fts_out
 
-    def separated(self, dataset: Iterable[str]) -> Pair[StrGroup]:
-        sgs_pair = self._separated((dataset,))
-        sg_pair = Pair(StrGroup(), StrGroup())
+    def separated(self, dataset: Iterable[str] | Iterable[Element]) -> Pair[ElementGroup]:
+        sgs_pair = self._separated((as_elements(dataset),))
+        sg_pair = Pair(ElementGroup(), ElementGroup())
 
         for sg_en, sgs_en in zip(sg_pair, sgs_pair):
             for data in sgs_en:
@@ -111,13 +205,13 @@ class Sorter:
 
         return sg_pair
 
-    def sorted(self, dataset: Iterable[str]) -> StrGroup:
+    def sorted(self, dataset: Iterable[str] | Iterable[Element]) -> ElementGroup:
         return self.separated(dataset).k
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class SimilarImageSorter(Sorter):
-    sorter_func: Callable[[Iterable[str]], StrGroups] = dataclasses.field(repr=False)
+    sorter_func: Callable[[Iterable[Element]], ElementGroups] = dataclasses.field(repr=False)
     keep_all: bool = dataclasses.field(default=True, repr=False)
 
     @classmethod
@@ -143,18 +237,18 @@ class SimilarImageSorter(Sorter):
 
     def _separated(
         self,
-        datasets: StrGroups,
-        ditched: Optional[StrGroups] = None
-    ) -> Pair[StrGroups]:
+        datasets: ElementGroups,
+        ditched: Optional[ElementGroups] = None
+    ) -> Pair[ElementGroups]:
         if ditched is None:
-            ditched = StrGroups()
-        kept = StrGroups(*map(self.sorter_func, datasets))
+            ditched = ElementGroups()
+        kept = ElementGroups(*map(self.sorter_func, datasets))
         return Pair(kept, ditched)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class GroupedSimilarImageSorter(Sorter):
-    compare_func: Callable[[Sequence[str], *tuple[Sequence[str]]], Sequence[bool]]
+    compare_func: Callable[[ElementGroup, *tuple[ElementGroup]], Sequence[bool]]
     sample_size: Optional[int] = None
     keep_all: bool = dataclasses.field(default=True, repr=False)
     kind: str = 'bruteforce'
@@ -170,7 +264,9 @@ class GroupedSimilarImageSorter(Sorter):
         inverted: bool = False
     ) -> Self:
         from image_sorter.image_sorter import compare_groups
-        fn = functools.partial(compare_groups, alg=alg, threshold=threshold, kind=kind, target=target)
+        fn = functools.partial(
+            compare_groups, key=lambda e: e.path, alg=alg, threshold=threshold, kind=kind, target=target
+        )
         if not inverted:
             compare_func = fn
         else:
@@ -184,19 +280,20 @@ class GroupedSimilarImageSorter(Sorter):
 
     def _separated(
         self,
-        datasets: StrGroups,
-        ditched: Optional[StrGroups] = None
-    ) -> Pair[StrGroups]:
+        datasets: ElementGroups,
+        ditched: Optional[ElementGroups] = None
+    ) -> Pair[ElementGroups]:
 
-        kept = StrGroups()
+        kept = ElementGroups()
         if ditched is None:
-            ditched = StrGroups()
+            ditched = ElementGroups()
         out_pair = Pair(kept, ditched)
 
         for i, group_a in enumerate(datasets):
             # print('>>>', group_a)
             if group_a in kept:
                 continue
+            self.assign_elements(group_a)
             kept.append(group_a)
             groups_b = datasets[i + 1:]
 
@@ -215,6 +312,7 @@ class GroupedSimilarImageSorter(Sorter):
                         *(textwrap.indent(str(sampled_group_b), ' ' * 8) for sampled_group_b in sampled_groups_b)
                     ]
                     logger.debug('\n'.join(msg_lines))
+                    self.assign_elements(groups_b[i])
                     kept.append(groups_b[i])
         logger.debug(f'result: {kept}')
         return out_pair
@@ -239,7 +337,9 @@ class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
     ) -> Self:
         from image_sorter.image_sorter import compare_groups
 
-        fn = functools.partial(compare_groups, alg=alg, threshold=threshold, kind=kind, target=target)
+        fn = functools.partial(
+            compare_groups, key=lambda e: e.path, alg=alg, threshold=threshold, kind=kind, target=target
+        )
         if not inverted:
             compare_func = fn
         else:
@@ -255,32 +355,36 @@ class GroupedSimilarImageFilter(GroupedSimilarImageSorter):
 
     def _separated(
         self,
-        datasets: StrGroups,
-        ditched: Optional[StrGroups] = None
-    ) -> Pair[StrGroups]:
-        kept = StrGroups()
+        datasets: ElementGroups,
+        ditched: Optional[ElementGroups] = None
+    ) -> Pair[ElementGroups]:
+        kept = ElementGroups()
         if ditched is None:
-            ditched = StrGroups()
+            ditched = ElementGroups()
         out_pair = Pair(kept, ditched)
 
         groups_b = datasets
 
         sampled_groups_b = [
-            utils.sampled(dataset, sample_size=self.sample_size) if self.sample_size is not None else dataset for dataset in datasets
+            utils.sampled(dataset, sample_size=self.sample_size)
+            if self.sample_size is not None else dataset for dataset in datasets
         ]
 
-        _ditched: StrGroups = StrGroups()
-        for i, r in enumerate(self.compare_func((self.reference,), *sampled_groups_b)):
+        _ditched = ElementGroups()
+        for i, r in enumerate(self.compare_func(ElementGroup((Element(self.reference),)), *sampled_groups_b)):
+            g = groups_b[i]
+            self.assign_elements(g)
+            # print(f'{g=}, {r=}')
             if r:
                 msg_lines = [
                     'Match found!',
-                    textwrap.indent(str(self.reference), ' ' * 4),
-                    *(textwrap.indent(str(sampled_group_b), ' ' * 8) for sampled_group_b in sampled_groups_b)
+                    textwrap.indent(self.reference, ' ' * 4),
+                    *(textwrap.indent(str([x.path for x in sampled_group_b]), ' ' * 8) for sampled_group_b in sampled_groups_b)
                 ]
                 logger.debug('\n'.join(msg_lines))
-                kept.append(groups_b[i])
+                kept.append(g)
             else:
-                _ditched.append(groups_b[i])
+                _ditched.append(g)
 
         if self.keep_all:
             kept.extend(_ditched)
@@ -351,12 +455,22 @@ class GenericSorter(Sorter):
     def _to_ditch(self, k: tuple[str, ...] | None) -> bool:
         return (k in self.ditch)
 
-    def _key(self, item: str, *items: str) -> tuple[str, ...] | Literal['ditch'] | None:
+    def _key(self, item: Element, *items: Element) -> tuple[str, ...] | Literal['ditch'] | None:
         k = 'ditch'
+
+        try:
+            g: tuple[str] = item.get(self, 'tags')
+            m = 'catched'
+        except KeyError:
+            m = None
+
         for pattern in self.patterns:
-            m = pattern.fullmatch(item, *items)
-            if m is not None:
-                g = m.groups()
+            _m = m if m is not None else pattern.fullmatch(item.path, *(_item.path for _item in items))
+            if _m is not None:
+                if _m != 'catched':
+                    g = _m.groups()
+                    for _item in (item, *items):
+                        _item.set(self, tags=g)
                 k = self._to_keep(g)
                 if self._whitelist_only and (k is False):
                     k = 'ditch'
@@ -375,27 +489,33 @@ class GenericSorter(Sorter):
                 k = (self.key_fmt.format(*k),)
             if k != 'ditch':
                 log_str = '' if k == () else f' <<< token: {k}'
-                logger.debug(f'⭕ {pattern}: {item}{log_str}')
+                logger.debug(f'⭕ {pattern}: {item.path}{log_str}')
                 break
-            logger.debug(f'❌ {pattern}: {item}')
+            logger.debug(f'❌ {pattern}: {item.path}')
         return k
+
+    def meta_str(self, e: Element) -> str | None:
+        ...
 
     def _separated(
         self,
-        datasets: StrGroups,
-        ditched: Optional[StrGroups] = None
-    ) -> Pair[StrGroups]:
-        kept = []
+        datasets: ElementGroups,
+        ditched: Optional[ElementGroups] = None
+    ) -> Pair[ElementGroups]:
+        kept = ElementGroups()
         if ditched is None:
-            ditched = StrGroups([StrGroup()])
+            ditched = ElementGroups([ElementGroup()])
         for dataset in datasets:
-            groups = collections.defaultdict(StrGroup)
+            groups: dict[Any, ElementGroup] = collections.defaultdict(ElementGroup)
             if not self.do_group:
                 for data in dataset:
-                    groups[self._key(data)].append(data)
+                    k = self._key(data)
+                    groups[k].append(data)
             else:
-                groups[self._key(*utils.sampled(dataset, self.sample_size))].extend(dataset)
-
+                dataset_sampled = utils.sampled(dataset, self.sample_size)
+                k = self._key(*dataset_sampled)
+                self.assign_elements(dataset, tags=dataset_sampled[0].get(self, 'tags'))
+                groups[k].extend(dataset)
             if 'ditch' in groups:
                 ditched[0].extend(groups.pop('ditch'))
 
@@ -532,6 +652,9 @@ class RegexSorter(GenericSorter):
             pattern_list.append(pattern)
         return pattern_list
 
+    def meta_str(self, e: Element) -> str | None:
+        return
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class RegexSorterCoeff(GenericSorterCoeff):
@@ -577,19 +700,21 @@ class ImageGroupTagSorter(GenericSorter):
 
     def _to_keep(self, k: tuple[str, ...] | None) -> tuple[str, ...] | None | Literal[False]:
         assert k is not None
+        setk = set(k)
         for _k in self.keep:
             if _k is None:
-                return None
-            if set(_k).issubset(k):
+                return ()
+            if setk.issuperset(_k):
                 return _k
         return False
 
     def _to_ditch(self, k: tuple[str, ...] | None) -> bool:
         assert k is not None
+        setk = set(k)
         for _k in self.ditch:
             if _k is None:
                 continue
-            if set(_k).issubset(k):
+            if setk.issuperset(_k):
                 return True
         return False
 
@@ -610,6 +735,17 @@ class ImageGroupTagSorter(GenericSorter):
             patterns, keep, ditch, key_fmt, tokens, sample_size=sample_size, do_group=do_group
         )
 
+    def meta_str(self, e: Element) -> str | None:
+        tags = e.get(self, 'tags')
+        str_list = []
+        for tag in tags:
+            if any(tag in keep for keep in self.keep if keep is not None):
+                str_list.append(tag)
+            elif any(tag in ditch for ditch in self.ditch if ditch is not None):
+                str_list.append(f'-{tag}')
+        if str_list:
+            return f'tags: {', '.join(str_list)}'
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class ImageGroupTagSorterCoeff(GenericSorterCoeff):
@@ -626,26 +762,26 @@ class SorterChain:
 
     def _separated(
         self,
-        datasets: StrGroups,
-        ditched: Optional[StrGroups] = None,
+        datasets: ElementGroups,
+        ditched: Optional[ElementGroups] = None,
         *,
         start: int = 0,
         end: Optional[int] = None
-    ) -> Pair[StrGroups]:
+    ) -> Pair[ElementGroups]:
         for sorter in self.sorters[start:end]:
             datasets, ditched = sorter._separated(datasets, ditched)
         if ditched is None:
-            ditched = StrGroups()
+            ditched = ElementGroups()
         return Pair(datasets, ditched)
 
     def _separated_async(
         self,
-        fts_in: FuturePair[StrGroups],
+        fts_in: FuturePair[ElementGroups],
         executor: ThreadPoolExecutor,
         *,
         start: int = 0,
         end: Optional[int] = None
-    ) -> FuturePair[StrGroups]:
+    ) -> FuturePair[ElementGroups]:
         fts_out = fts_in
         for sorter in self.sorters[start:end]:
             fts_out = sorter._separated_async(fts_out, executor=executor)
@@ -653,15 +789,14 @@ class SorterChain:
 
     def separated(
         self,
-        dataset: Iterable[str],
+        dataset: Iterable[str] | Iterable[Element],
         *,
         start: int = 0,
         end: Optional[int] = None
-    ) -> Pair[StrGroup]:
-        pair_in = self._separated(
-            StrGroups([StrGroup(dataset)]), start=start, end=end
-        )
-        pair_out = Pair(StrGroup(), StrGroup())
+    ) -> Pair[ElementGroup]:
+        dataset = as_elements(dataset)
+        pair_in = self._separated(ElementGroups([ElementGroup(dataset)]), start=start, end=end)
+        pair_out = Pair(ElementGroup(), ElementGroup())
         for k in pair_in.k:
             pair_out.k.extend(k)
         for d in pair_in.d:
@@ -674,5 +809,5 @@ class SorterChain:
         *,
         start: int = 0,
         end: Optional[int] = None
-    ) -> StrGroup:
+    ) -> ElementGroup:
         return self.separated(dataset, start=start, end=end).k

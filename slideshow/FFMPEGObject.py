@@ -244,6 +244,16 @@ class FFMPEGObject(Generic[T]):
                     duration_ts = duration * 90000  # timebase = 1/90000, not sure if it's a constant in mpegts format
                     durations = (duration, duration_ts)
                     stream = ffmpeg.input(media_path, framerate=self.image_framerate)
+                    if (bkg_color := media.get('bkg-color')) is not None:
+                        meta = self.probe(media_path)['streams'][0]
+                        shape = (meta['width'], meta['height'])
+                        stream = ffmpeg.input(
+                            f'color=c={bkg_color}:s={shape[0]}x{shape[1]}', f='lavfi', t=1
+                        ).overlay(stream)
+                        # stream = self._apply_standard_filters(
+                        #     stream, media_type, self.size, self.fps, self.pts, self.dar, autoscale=autoscale
+                        # )
+                        # return stream, durations
                 case 'animation':
                     loop = int(media.get('repeat', 1))
                     durations = self._get_media_duration(media_path, loop=loop)
@@ -296,6 +306,7 @@ class FFMPEGObject(Generic[T]):
         _fname = temp_fname if temp_fname is not None else fname
         if logger is not None:
             logger.detail(shlex.join(outstream.compile()))
+        # print(shlex.join(outstream.compile()))
         outstream.run(cmd=FFMPEG_BIN, overwrite_output=True)  # type: ignore
         if temp_fname is not None:
             shutil.move(_fname, fname)
