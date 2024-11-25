@@ -53,8 +53,6 @@ class Element:
     def as_str(self, path_extra: Optional[str] = None) -> str:
         if path_extra is None:
             path_extra = ''
-        if len(self._meta.keys()) != 3:
-            print(f'{self._meta=}')
         return '{path}{path_extra}{meta}'.format(path_extra=path_extra, **self.as_strdict())
 
 
