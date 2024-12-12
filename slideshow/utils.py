@@ -199,7 +199,7 @@ class AspectEstimator:
     @staticmethod
     def get_sample_aspect(sample: str) -> Optional[tuple[int, int]]:
         sample_meta = ffmpeg.probe(sample)['streams'][0]
-        display_aspect_ratio = sample_meta.get('display_aspect_ratio', None)
+        display_aspect_ratio: str | None = sample_meta.get('display_aspect_ratio', None)
         if display_aspect_ratio is not None:
             return tuple(map(int, display_aspect_ratio.split(':', 1)))
         else:
@@ -223,7 +223,7 @@ class AspectEstimator:
             if counter_size:
                 self._aspect = counter.most_common(1)[0][0]
             else:
-                self.logger.warn('Aspect infomation not extracted properly. "auto" mode used instead.')
+                self.logger.warning('Aspect infomation not extracted properly. "auto" mode used instead.')
                 self._aspect = 'auto'
         return self._aspect
 
