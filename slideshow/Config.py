@@ -95,6 +95,8 @@ class ConfigWriter:
     @classmethod
     def create(cls, processor: Optional[ModuleType | str] = None) -> Self:
         processor = get_processor(processor)
+        if processor is None:
+            raise ModuleNotFoundError('No proper module found.')
         return cls(processor)
 
     def write(self, config_file: Path | str, pattern: Optional[str | Path]) -> None:
@@ -304,6 +306,7 @@ class ConfigReader:
                 raise e
         for sorter in g:
             if isinstance(sorter, dict):
+                sorter = {k: v if not isinstance(v, list) else tuple(v) for k, v in sorter.items()}
                 if 'type' not in sorter:
                     sorter['type'] = 'path'
                 yield sorter

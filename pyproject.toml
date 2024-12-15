@@ -22,6 +22,9 @@ dependencies = [
 [project.optional-dependencies]
 gui = ["pyqt6", "python-vlc"]
 server = ["fastapi", "uvicorn"]
+album-tools = [
+    "image_sorter @ https://github.com/lucifiel1618/image_sorter/archive/main.zip"
+]
 
 [project.scripts]
 slideshow = "slideshow.slideshow:main"

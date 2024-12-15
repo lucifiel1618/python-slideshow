@@ -406,7 +406,7 @@ class GenericSorter(Sorter):
     patterns: tuple[GenericPattern, ...]
     keep: Sequence[Optional[tuple[str, ...]]]
     ditch: Sequence[Optional[tuple[str, ...]]]
-    key_fmt: Optional[str]
+    key_fmt: Optional[str | tuple[str, ...]]
     _whitelist_only: bool = dataclasses.field(repr=False)
     _match_only: bool = dataclasses.field(repr=False)
     keep_all: bool = dataclasses.field(repr=False)
@@ -427,7 +427,7 @@ class GenericSorter(Sorter):
         patterns: Iterable[GenericPattern | str],
         keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None,
         ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None,
-        key_fmt: Optional[str] = None,
+        key_fmt: Optional[str | tuple[str, ...]] = None,
         tokens: Optional[Sequence[GenericPattern | str]] = None,
         sample_size: Optional[int] = None,
         do_group: bool = False
@@ -484,7 +484,12 @@ class GenericSorter(Sorter):
                 else:
                     k = ()
             if (self.key_fmt is not None) and (k not in ((), 'ditch')):
-                k = (self.key_fmt.format(*k),)
+                assert k is not None
+                if not isinstance(self.key_fmt, str):
+                    key_fmt = tuple(self.key_fmt[0] for _ in k) if len(self.key_fmt) == 1 else self.key_fmt
+                    k = tuple(_key_fmt.format(_k) for _key_fmt, _k in zip(key_fmt, k))
+                else:
+                    k = (self.key_fmt.format(*k),)
             if k != 'ditch':
                 log_str = '' if k == () else f' <<< token: {k}'
                 logger.debug(f'⭕ {pattern}: {item.path}{log_str}')
@@ -537,7 +542,7 @@ class GenericSorterCoeff:
     patterns: Optional[tuple[str | Sequence[str] | Sequence[Sequence[str]], ...]] = None
     keep: Optional[Sequence[Optional[tuple[str, ...]]]] = None
     ditch: Optional[Sequence[Optional[tuple[str, ...]]]] = None
-    key_fmt: Optional[str] = None
+    key_fmt: Optional[str | tuple[str]] = None
     sample_size: Optional[int] = None
     do_group: Optional[bool] = None
 
@@ -722,7 +727,7 @@ class ImageGroupTagSorter(GenericSorter):
         patterns: Iterable[ImageTagPattern | Iterable[str]],
         keep: Optional[Sequence[tuple[str, ...] | None]] = None,
         ditch: Optional[Sequence[tuple[str, ...] | None]] = None,
-        key_fmt: Optional[str] = None,
+        key_fmt: Optional[str | tuple[str, ...]] = None,
         tokens: Optional[Sequence[GenericPattern | str]] = None,
         sample_size: Optional[int] = None,
         do_group: bool = False
