@@ -246,6 +246,7 @@ $RECYCLE.BIN/
 
 ### VisualStudioCode ###
 .vscode/*
+!.vscode/schemas
 
 # Local History for Visual Studio Code
 .history/

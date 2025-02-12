@@ -448,7 +448,7 @@ class FFMPEGObjectLive(FFMPEGObject):
         super().__init__(delay, size, fps, rate, loglevel)
         # self.run_args.extend(['-loglevel', 'error'])
         self.output_kwds.update(
-            vcodec='libx264',
+            codec='libx264',
             format='mpegts',
             pix_fmt='yuv420p',
             fps_mode='auto',

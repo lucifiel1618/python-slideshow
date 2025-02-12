@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Album Configuration Schema",
+  "description": "Schema for album and image group configuration YAML files",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "oneOf": [
+      {
+        "description": "Predefined configuration with @ prefix",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^@.*$",
+            "description": "Global configuration identifier starting with @"
+          },
+          "cmd": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Command array for configuration settings"
+          },
+          "group": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "required": ["id"]
+      },
+      {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[^@].*$",
+            "description": "Chapter identifier"
+          },
+          "image": {
+            "type": "string",
+            "description": "URL or path to the reference image"
+          },
+          "title": {
+            "type": "string",
+            "enum": ["use_original", "use_name"],
+            "description": "Specifies whether to use the original or english title for the chapter identifier (if missing)"
+          },
+          "name": {
+            "type": "string",
+            "description": "English title for the chapter"
+          },
+          "original": {
+            "type": "string",
+            "description": "Original title for the chapter (potentially in other languages)"
+          },
+          "group": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": ["image_group_filter", "image_group_tags", "image_group"],
+                      "description": "Type of grouping to apply"
+                    },
+                    "sample_size": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "description": "Number of samples to take from the group"
+                    },
+                    "ditch": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Tags to exclude from the group"
+                    },
+                    "alg": {
+                      "type": "string",
+                      "enum": ["pixelwise", "SSIM", "ccip", "lpips"],
+                      "description": "Algorithm to use for grouping",
+                      "default": "pixelwise"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": ["bruteforce", "plateau"],
+                      "description": "Kind of grouping algorithm to apply"
+                    }
+                    
+                  },
+                  "required": ["type"]
+                }
+              ]
+            }
+          }
+        },
+        "required": ["group"]
+      }
+    ]
+  }
+}

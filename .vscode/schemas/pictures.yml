@@ -1,0 +1,62 @@
+- id: "@global"
+  group:
+    - "ev/group1"
+
+- id: "@header"
+  cmd:
+    - aspect="16X9"
+
+- image: "https://example.com/image1.jpg"
+  title: use_original
+  name: "Image One"
+  original: "圖片一"
+  group: []
+
+- image: "https://example.com/image2.jpg"
+  title: use_original
+  name: "Image Two"
+  original: "圖片二"
+  group:
+    - null
+    - type: image_group_filter
+      sample_size: 2
+    - type: image_group_tags
+      ditch:
+        - "low_quality"
+      sample_size: 1
+
+- image: "https://example.com/image3.jpg"
+  title: use_name
+  name: "Image Three"
+  original: "圖片三"
+  group:
+    - type: image_group_filter
+      sample_size: 1
+    - type: image_group_tags
+      ditch:
+        - "blurry"
+      sample_size: 1
+
+- image: "https://example.com/image4.jpg"
+  title: use_original
+  name: "Image Four"
+  original: "圖片四"
+  group:
+    - null
+    - type: image_group_filter
+      sample_size: 1
+    - type: image_group_tags
+      ditch:
+        - "overexposed"
+      sample_size: 1
+    - type: image_group
+      alg: "lpips"
+      kind: "plateau"
+      sample_size: 1
+
+- id: "Sample Image 5"
+  group:
+    - null
+
+- id: "@ditch"
+  group: []
