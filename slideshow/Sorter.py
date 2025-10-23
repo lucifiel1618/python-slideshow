@@ -194,7 +194,7 @@ class Sorter:
         return fts_out
 
     def separated(self, dataset: Iterable[str] | Iterable[Element]) -> Pair[ElementGroup]:
-        sgs_pair = self._separated((as_elements(dataset),))
+        sgs_pair = self._separated([ElementGroup(as_elements(dataset))])
         sg_pair = Pair(ElementGroup(), ElementGroup())
 
         for sg_en, sgs_en in zip(sg_pair, sgs_pair):

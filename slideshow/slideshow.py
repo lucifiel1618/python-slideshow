@@ -13,8 +13,11 @@ logger = utils.get_logger('slideshow')
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Python Slideshow',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter, add_help=False)
+    parser = argparse.ArgumentParser(
+        description='Python Slideshow',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        add_help=False
+    )
     parser.add_argument(
         '-d', '--delay', type=int, default=1000,
         help='Delay time in milisecond. For example 1000 mean 1 fps'
@@ -23,8 +26,17 @@ def main() -> None:
     parser.add_argument('--bgm-rate', type=float, default=2., help='BGM Playback speed')
     parser.add_argument('-s', '--qsize', type=int, default=100, help='Queue size')
     parser.add_argument('-C', '--chapter', default=[], action='append', help='Only read the selected chapters')
-    parser.add_argument('--log-level', default='DEBUG', choices=['DETAIL', 'DEBUG', 'INFO', 'WARNING', 'ERROR'], help='The log level')
-    parser.add_argument('--no-color-log', action='store_true', help='Whether not to use colored loggers. Python packages `coloredlogs` and `humanfriendly` required')
+    parser.add_argument(
+        '--log-level',
+        default='DEBUG',
+        choices=['DETAIL', 'DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='The log level'
+    )
+    parser.add_argument(
+        '--no-color-log',
+        action='store_true',
+        help='Whether not to use colored loggers. Python packages `coloredlogs` and `humanfriendly` required'
+    )
     parser.add_argument(
         '--ffmpeg-loglevel', nargs='?', const=True, default=False,
         help='Specify the log level for FFmpeg. If provided without an argument, defaults to True. If not provided, defaults to False.'

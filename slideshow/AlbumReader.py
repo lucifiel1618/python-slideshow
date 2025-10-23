@@ -18,6 +18,7 @@ mimetypes.add_type('text/album', '.album')
 mimetypes.add_type('video/ogg', '.ogv')  # platform dependent, not directly available on linux
 mimetypes.add_type('video/x-ms-wmv', '.wmv')  # platform dependent, not directly available on linux
 mimetypes.add_type('image/apng', '.apng')
+mimetypes.add_type('animation/webp', '.webp')
 
 ALBUM_FILE = 'pictures.album'
 CONFIG_FILE = 'pictures.yml'

@@ -274,10 +274,28 @@ class FFMPEGObject(Generic[T]):
         return stream, durations
 
     def add_stream(self, media: ET.Element) -> None:
-        stream, (duration, duration_ts) = self.create_stream(media)
+        sei = media.get('path', '')
+
+        _stream, (duration, duration_ts) = self.create_stream(media)
+        # stream = ffmpeg.output(
+        #     _stream,
+        #     f'{sei}.ts',
+        #     format='mpegts',
+        #     vcodec='libx264',
+        #     an=None,
+        #     **{'bsf:v': 'h264_metadata=sei_user_data=086f3693-b7b3-4f2c-9653-21492feee5b8+' + sei}
+        # ) ### TODO: this does work to store related info into the file. however, I don't know how to extract info with ffprobe or any other tools yet
+        # stream = stream.node.stream()
+
+        # stream.stdin.write(input_stream)
+        # stream.close()
+
+        stream = _stream
+
         self.streams.append(stream)
         self.total_duration += duration
         self.total_duration_ts += duration_ts
+        print('>>> function end')
 
     def get_stream(self) -> ffmpeg.nodes.FilterableStream:
         stream: ffmpeg.nodes.FilterableStream = ffmpeg.concat(*self.streams)
@@ -357,9 +375,12 @@ class FFMPEGObject(Generic[T]):
     ) -> ffmpeg.nodes.FilterableStream:
         oversized = False
         if x != '0':
-            oversized |= eval(f'({x} - W) >= 0', dict(w=1, W=1))
+            if not x.isalnum():
+                oversized |= eval(f'({x} - W) >= 0', dict(w=1, W=1))
         if y != '0':
-            oversized |= eval(f'({y} - H) >= 0', dict(h=1, H=1))
+            if not y.isalnum():
+                oversized |= eval(f'({y} - H) >= 0', dict(h=1, H=1))
+        print(f'{x=}, {y=}, {oversized=}')
         if not oversized:
             return m1.overlay(m2, x=x, y=y)
         n = m2.node

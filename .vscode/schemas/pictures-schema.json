@@ -35,13 +35,15 @@
             }
           }
         },
-        "required": ["id"]
+        "required": [
+          "id"
+        ]
       },
       {
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[^@].*$",
+            "pattern": "^[^@]*.*$",
             "description": "Chapter identifier"
           },
           "image": {
@@ -50,7 +52,10 @@
           },
           "title": {
             "type": "string",
-            "enum": ["use_original", "use_name"],
+            "enum": [
+              "use_original",
+              "use_name"
+            ],
             "description": "Specifies whether to use the original or english title for the chapter identifier (if missing)"
           },
           "name": {
@@ -66,15 +71,26 @@
             "items": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "type": "null",
+                  "description": "Regular expression based path matching"
+                },
+                {
+                  "type": "array",
+                  "description": "Regular expression based path matching"
                 },
                 {
                   "type": "object",
                   "properties": {
                     "type": {
                       "type": "string",
-                      "enum": ["image_group_filter", "image_group_tags", "image_group"],
-                      "description": "Type of grouping to apply"
+                      "enum": [
+                        "image_group_filter",
+                        "image_group_tags",
+                        "image_group",
+                        "image",
+                        "path"
+                      ],
+                      "description": "Type of image sorting algorithm to apply.\n\n- `image_group_filter`: group-based filtering (default alg = ccip)\n- `image_group_tags`: tag-based grouping (no default alg)\n- `image_group`: image grouping (default alg = pixelwise)\n- `image`: image-level comparison (default alg = pixelwise)\n- `path`: path-based grouping (no alg)"
                     },
                     "sample_size": {
                       "type": "integer",
@@ -90,24 +106,84 @@
                     },
                     "alg": {
                       "type": "string",
-                      "enum": ["pixelwise", "SSIM", "ccip", "lpips"],
-                      "description": "Algorithm to use for grouping",
-                      "default": "pixelwise"
+                      "enum": [
+                        "pixelwise",
+                        "SSIM",
+                        "ccip",
+                        "lpips"
+                      ],
+                      "description": "Algorithm to use for grouping. Defaults depend on `type`:\n- `image` / `image_group` → pixelwise\n- `image_group_filter` → ccip"
                     },
                     "kind": {
                       "type": "string",
-                      "enum": ["bruteforce", "plateau"],
+                      "enum": [
+                        "bruteforce",
+                        "plateau"
+                      ],
                       "description": "Kind of grouping algorithm to apply"
                     }
-                    
                   },
-                  "required": ["type"]
+                  "required": [
+                    "type"
+                  ],
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "image"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "alg": {
+                            "default": "pixelwise"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "image_group"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "alg": {
+                            "default": "pixelwise"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "image_group_filter"
+                          }
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "alg": {
+                            "default": "ccip"
+                          }
+                        }
+                      }
+                    }
+                  ]
                 }
               ]
             }
           }
         },
-        "required": ["group"]
+        "required": [
+          "group"
+        ]
       }
     ]
   }
