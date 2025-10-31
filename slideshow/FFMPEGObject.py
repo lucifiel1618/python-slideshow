@@ -4,10 +4,15 @@ from xml.etree import ElementTree as ET
 from pathlib import Path
 import shutil
 import functools
-from typing import Generic, Iterable, Literal, Optional, Callable, Any, Sequence, TypeVar, TypedDict, cast
+from typing import Iterable, Literal, Optional, Callable, Any, Sequence, TypedDict, cast
 import ffmpeg
 
+from slideshow import Subtitle
+
 from . import utils
+
+
+SUBTITLER = Subtitle.NullSubtitle
 
 
 def find_executable(executable_name: str) -> str:
@@ -29,11 +34,11 @@ def find_executable(executable_name: str) -> str:
 FFMPEG_BIN = find_executable('ffmpeg@5')
 FFPROBE_BIN = find_executable('ffprobe@5')
 
-T = TypeVar('T')
+
 LogLevel = Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'QUIET']
 
 
-class FFMPEGObject(Generic[T]):
+class FFMPEGObject[T]:
     DEFAULT_RUN_ARGS = ['-hide_banner', '-nostats']
     DEFAULT_LOGLEVL: LogLevel = 'INFO'
 
@@ -43,7 +48,7 @@ class FFMPEGObject(Generic[T]):
         size: tuple[int, int],
         fps: int,
         rate: float,
-        loglevel: Optional[LogLevel] | bool = None
+        loglevel: Optional[LogLevel | bool] = None
     ):
         self._delay = delay
         self._size = size
@@ -58,6 +63,7 @@ class FFMPEGObject(Generic[T]):
         self._loglevel = loglevel
         self.streams: list[ffmpeg.nodes.FilterableStream] = []
         self.streams_used: dict[ffmpeg.nodes.FilterableStream, int] = {}
+        self.subtitler = SUBTITLER(*size)
         self.total_duration: float = 0.
         self.total_duration_ts: float = 0.
         self._dryrun = False
@@ -107,7 +113,7 @@ class FFMPEGObject(Generic[T]):
         loglevel = self.loglevel
         if loglevel is not None:
             if loglevel is not False:
-                run_args.extend(['-loglevel', loglevel])
+                run_args.extend(['-loglevel', loglevel.lower()])
         return run_args
 
     def set_run_args(self, value: Optional[Iterable[str] | bool] = None):
@@ -124,13 +130,13 @@ class FFMPEGObject(Generic[T]):
         if loglevel is None:
             return None
         if loglevel is False:
-            return 'quiet'
+            return 'QUIET'
         if loglevel is True:
             return self.DEFAULT_LOGLEVL
-        return loglevel.lower()
+        return loglevel.upper()  # pyright: ignore[reportReturnType]
 
     def set_loglevel(self, value: Optional[LogLevel | bool]):
-        self._loglevel = value
+        self._loglevel: bool | None | LogLevel = value
 
     loglevel = property(get_loglevel, set_loglevel)
 
@@ -149,7 +155,7 @@ class FFMPEGObject(Generic[T]):
         if isinstance(logf, str):
             logf = Path(logf)
         with logf.open('a') as logf_of:
-            subprocess.check_call(stream.compile(), stderr=logf_of)
+            subprocess.check_call(stream.compile(), stderr=logf_of)  # pyright: ignore[reportAttributeAccessIssue]
 
     @staticmethod
     @functools.lru_cache(maxsize=10)
@@ -223,7 +229,9 @@ class FFMPEGObject(Generic[T]):
         #     stream = stream.filter('setdar', dar)
         return stream
 
-    def create_stream(self, media: ET.Element, autoscale: bool = True) -> tuple[ffmpeg.nodes.FilterableStream, tuple[float, ...]]:
+    def create_stream(
+        self, media: ET.Element, autoscale: bool = True
+    ) -> tuple[ffmpeg.nodes.FilterableStream, tuple[float, ...]]:
         if media.tag == 'overlay':
             stream, durations = self.overlay_stream(media)
             if autoscale:
@@ -274,31 +282,31 @@ class FFMPEGObject(Generic[T]):
         return stream, durations
 
     def add_stream(self, media: ET.Element) -> None:
-        sei = media.get('path', '')
-
-        _stream, (duration, duration_ts) = self.create_stream(media)
-        # stream = ffmpeg.output(
-        #     _stream,
-        #     f'{sei}.ts',
+        stream, (duration, duration_ts) = self.create_stream(media)
+        # _stream = _stream.output(
+        #     'pipe:',
         #     format='mpegts',
         #     vcodec='libx264',
-        #     an=None,
         #     **{'bsf:v': 'h264_metadata=sei_user_data=086f3693-b7b3-4f2c-9653-21492feee5b8+' + sei}
-        # ) ### TODO: this does work to store related info into the file. however, I don't know how to extract info with ffprobe or any other tools yet
-        # stream = stream.node.stream()
-
-        # stream.stdin.write(input_stream)
-        # stream.close()
-
-        stream = _stream
+        # )  # TODO: this does work to store related info into the file.
+        # however, I don't know how to extract info with ffprobe or any other tools yet
+        # # # print(f'output bytestream {bytestream=}')
+        # stream = ffmpeg.input('pipe:', format='mpegts')
+        # stream.output('pipe:', format='mpegts', codec='libx264').run(input=bytestream, quiet=True)
+        # proc.stdin.write(bytestream)
+        # proc.stdin.close()
 
         self.streams.append(stream)
+        start_time = self.total_duration
         self.total_duration += duration
+        end_time = self.total_duration
         self.total_duration_ts += duration_ts
-        print('>>> function end')
+
+        if (text := media.get('path')) is not None:
+            self.subtitler.add_entry(start_time, end_time, text)
 
     def get_stream(self) -> ffmpeg.nodes.FilterableStream:
-        stream: ffmpeg.nodes.FilterableStream = ffmpeg.concat(*self.streams)
+        stream: ffmpeg.nodes.FilterableStream = ffmpeg.concat(*self.streams, v=1, a=0)
         # if self.start_pts != 0:
         #     stream = stream.filter('setpts', f'{self.start_pts}+PTS')
         return stream
@@ -306,7 +314,15 @@ class FFMPEGObject(Generic[T]):
     def output_stream(self, fname: str) -> ffmpeg.nodes.FilterableStream:
         output_kwds = self.output_kwds.copy()
         output_kwds['output_ts_offset'] = self.start_pts / 90000
-        stream: ffmpeg.nodes.FilterableStream = self.get_stream().output(fname, **output_kwds).global_args(*self.run_args)
+        subtitle_path = Path(fname).with_suffix(self.subtitler.SUFFIX)
+        self.subtitler.export(subtitle_path)
+        stream: ffmpeg.nodes.FilterableStream = self.get_stream()
+        stream = self.subtitler.injected(stream)
+        stream = (
+            stream
+            .output(fname, **output_kwds)  # pyright: ignore[reportAttributeAccessIssue]
+            .global_args(*self.run_args)
+        )
         return stream
 
     def print_dryrun(self) -> None:
@@ -314,7 +330,7 @@ class FFMPEGObject(Generic[T]):
 
     @staticmethod
     def _compile_call(
-        fname: str,
+        fname: Path,
         outstream: ffmpeg.nodes.FilterableStream,
         temp_fname: Optional[str] = None,
         callback: Optional[Callable[[str], T]] = None,
@@ -323,16 +339,16 @@ class FFMPEGObject(Generic[T]):
     ) -> T | None:
         _fname = temp_fname if temp_fname is not None else fname
         if logger is not None:
-            logger.detail(shlex.join(outstream.compile()))
+            logger.detail(shlex.join(outstream.compile()))  # pyright: ignore[reportAttributeAccessIssue]
         # print(shlex.join(outstream.compile()))
         outstream.run(cmd=FFMPEG_BIN, overwrite_output=True)  # type: ignore
         if temp_fname is not None:
             shutil.move(_fname, fname)
         if callback is not None:
-            return callback(fname)
+            return callback(str(fname))
 
     @staticmethod
-    def callback(fname: str) -> T:
+    def callback(fname: str, *, meta: Optional[dict[str, Any]] = None) -> T:
         ...
 
     def compile_call(
@@ -343,14 +359,14 @@ class FFMPEGObject(Generic[T]):
         logger=None
     ) -> Callable[[], T]:
         _path = temp_path if temp_path is not None else path
-        fname = str(path)
         temp_fname = str(temp_path) if temp_path is not None else None
         outstream = self.output_stream(str(_path))
         callback = self.callback
-        self.logger.detail(f'Prepare {fname}')
+        self.logger.detail(f'Prepare {path}')
         f: Callable[[], T] = functools.partial(
-            self._compile_call, fname, outstream, temp_fname, callback, logger=logger
+            self._compile_call, path, outstream, temp_fname, callback, logger=logger
         )  # type: ignore
+
         return f
 
     def run(self, path: Path, temp_path: Optional[Path] = None, dryrun: Optional[bool] = None) -> T | None:
@@ -365,6 +381,7 @@ class FFMPEGObject(Generic[T]):
         self.streams_used.clear()
         self.total_duration = 0.
         self.total_duration_ts = 0.
+        self.subtitler.clear()
 
     def _overlay(
         self,
@@ -382,19 +399,19 @@ class FFMPEGObject(Generic[T]):
                 oversized |= eval(f'({y} - H) >= 0', dict(h=1, H=1))
         print(f'{x=}, {y=}, {oversized=}')
         if not oversized:
-            return m1.overlay(m2, x=x, y=y)
+            return m1.overlay(m2, x=x, y=y)  # pyright: ignore[reportAttributeAccessIssue]
         n = m2.node
         while not isinstance(n, ffmpeg.nodes.InputNode):
             n = next(iter(n.incoming_edge_map.values()))[0]
         meta2 = self.probe(n.kwargs['filename'])['streams'][0]
-        w: str = '0' if x is None else ('{}'.format(eval(f'str({x})+"+"+str(w)', dict(w=meta2['width'], W='iw'))))  # eval('W+str(w)') = 'iw' + str(w)
+        w: str = '0' if x is None else ('{}'.format(eval(f'str({x})+"+"+str(w)', dict(w=meta2['width'], W='iw'))))
         h: str = '0' if y is None else ('{}'.format(eval(f'str({y})+"+"+str(h)', dict(h=meta2['height'], H='ih'))))
-        stream = m1.filter('pad', w=w, h=h)
+        stream = m1.filter('pad', w=w, h=h)  # pyright: ignore[reportAttributeAccessIssue]
         return stream.overlay(m2, x='W-w', y='H-h')
 
     def overlay_stream(self, media: ET.Element) -> tuple[ffmpeg.nodes.FilterableStream, tuple[float, ...]]:
         streams_dict: dict[str | Literal[0], list[ET.Element]] = {}
-        main_stream_id: str | Literal[0] = None
+        main_stream_id: str | Literal[0] | None = None
 
         for medium in media:
             id = medium.get('id')
@@ -420,7 +437,7 @@ class FFMPEGObject(Generic[T]):
             streams_dict.setdefault(parent_id, []).append(medium)
 
         stream_id = main_stream_id
-        streams = streams_dict.pop(stream_id)
+        streams = streams_dict.pop(stream_id)  # pyright: ignore[reportArgumentType]
         stream, durations = self.create_stream(streams.pop(0), autoscale=False)
 
         stack = [(stream, {}, streams, stream_id)]
@@ -439,7 +456,7 @@ class FFMPEGObject(Generic[T]):
                         **_attribs
                     )
                 else:
-                    _streams = streams_dict.pop(_stream_id)
+                    _streams = streams_dict.pop(_stream_id)  # pyright: ignore[reportArgumentType]
                     _stream = self.create_stream(medium, autoscale=False)[0]
                     stack.append((stream, attribs, streams, stream_id))
                     stack.append((_stream, _attribs, _streams, _stream_id))
@@ -464,7 +481,7 @@ class FFMPEGObjectLive(FFMPEGObject):
         size: tuple[int, int],
         fps: int = 30,
         rate: float = 1.,
-        loglevel: Optional[LogLevel] = None
+        loglevel: Optional[LogLevel | bool] = None
     ):
         super().__init__(delay, size, fps, rate, loglevel)
         # self.run_args.extend(['-loglevel', 'error'])
@@ -478,9 +495,13 @@ class FFMPEGObjectLive(FFMPEGObject):
         )
 
     @staticmethod
-    def callback(fname: str) -> VideoMeta:
-        meta: VideoMeta = {'tag': 'video', 'content': fname}
-        return meta
+    def callback(fname: str, *, meta: Optional[dict[str, Any]] = None) -> VideoMeta:
+        _meta: VideoMeta = {'tag': 'video', 'content': fname}
+        if meta is not None:
+            _meta.update(**meta)
+        subtitle_file = Path(fname).with_suffix(SUBTITLER.SUFFIX)
+        subtitle_file.unlink(missing_ok=True)
+        return _meta
 
 
 class FFMPEGObjectOutput(FFMPEGObject):
@@ -490,7 +511,7 @@ class FFMPEGObjectOutput(FFMPEGObject):
         size: tuple[int, int],
         fps: int,
         rate: float,
-        loglevel: Optional[LogLevel] = None
+        loglevel: Optional[LogLevel | bool] = None
     ):
         super().__init__(delay, size, fps, rate, loglevel)
         # self.run_args.extend(['-loglevel', 'debug'])

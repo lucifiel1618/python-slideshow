@@ -8,19 +8,17 @@ from pathlib import Path
 import random
 import re
 
-from typing import Callable, Iterable, Iterator, Literal, Optional, Self, Sequence, TypeVar
+from typing import Callable, Iterable, Iterator, Literal, Mapping, Optional, Protocol, Self, Sequence, cast
 
 from PIL import Image
 import ffmpeg
 
 LOGLEVEL = 'DEBUG'
-FFMPEG_LOGLEVEL = 'debug'
+FFMPEG_LOGLEVEL = 'DEBUG'
 COLOR_LOG = True
 
-T = TypeVar('T')
 
-
-def _addLoggingLevel(levelName, levelNum, methodName=None):
+def _addLoggingLevel(levelName: str, levelNum: int, methodName: Optional[str] = None):
     """
     Comprehensively adds a new logging level to the `logging` module and the
     currently configured logging class.
@@ -37,11 +35,11 @@ def _addLoggingLevel(levelName, levelNum, methodName=None):
 
     Example
     -------
-    >>> addLoggingLevel('TRACE', logging.DEBUG - 5)
-    >>> logging.getLogger(__name__).setLevel("TRACE")
-    >>> logging.getLogger(__name__).trace('that worked')
-    >>> logging.trace('so did this')
-    >>> logging.TRACE
+    >>> addLoggingLevel('DETAIL', logging.DEBUG - 5)
+    >>> logging.getLogger(__name__).setLevel("DETAIL")
+    >>> logging.getLogger(__name__).detail('that worked')
+    >>> logging.detail('so did this')
+    >>> logging.DETAIL
     5
 
     """
@@ -74,11 +72,24 @@ def _addLoggingLevel(levelName, levelNum, methodName=None):
 _addLoggingLevel('DETAIL', logging.DEBUG - 5)
 
 
+class DetailLogger(logging.Logger, Protocol):  # pyright: ignore[reportGeneralTypeIssues]
+    def detail(
+        self,
+        msg: object,
+        *args: object,
+        exc_info: logging._ExcInfoType = None,
+        stack_info: bool = False,
+        stacklevel: int = 1,
+        extra: Mapping[str, object] | None = None
+    ) -> None:
+        ...
+
+
 def get_logger(
         name: str, color: Optional[bool] = None,
         to_stream: bool = True,
         to_file: bool | Path | str = False
-) -> logging.Logger:
+) -> DetailLogger:
     if color is None:
         color = COLOR_LOG
     has_colorlogs = True
@@ -93,7 +104,7 @@ def get_logger(
     # Logger Creation
     logger = logging.getLogger(name)
     if logger.hasHandlers():
-        return logger
+        return cast(DetailLogger, logger)
     # Formatter Setting
     fmt = {
         'fmt': '{asctime} {name} {levelname} {message}',
@@ -103,7 +114,7 @@ def get_logger(
     if color is True and has_colorlogs:
         formatter = coloredlogs.ColoredFormatter(**fmt)
     else:
-        formatter = logging.Formatter(**fmt)
+        formatter = logging.Formatter(**fmt)  # pyright: ignore[reportArgumentType]
     # Handlers Setting
     handlers: list[logging.Handler] = []
     if to_stream:
@@ -121,7 +132,7 @@ def get_logger(
     logger.setLevel(getattr(logging, LOGLEVEL))
     if color is True and not has_colorlogs:
         logger.info('coloredlogs not installed. uncolored logging will not be populated.')
-    return logger
+    return cast(DetailLogger, logger)
 
 
 def rescaled(image, size, result, i=0, fmt=None):
@@ -155,8 +166,8 @@ class AspectEstimator:
         self._add_sample_aspect: Callable[[mp.Queue[tuple[int, int]], str], None]
         self.set_prop(prop)
 
-        self._pool: mp.pool.Pool
-        self._manager: mp.managers.SyncManager
+        self._pool: mp.pool.Pool  # pyright: ignore[reportAttributeAccessIssue]
+        self._manager: mp.managers.SyncManager  # pyright: ignore[reportAttributeAccessIssue]
         self._result_queue: mp.Queue[tuple[int, int]]
         if self._prop != 0:
             self._pool = mp.Pool()
@@ -201,7 +212,10 @@ class AspectEstimator:
         sample_meta = ffmpeg.probe(sample)['streams'][0]
         display_aspect_ratio: str | None = sample_meta.get('display_aspect_ratio', None)
         if display_aspect_ratio is not None:
-            return tuple(map(int, display_aspect_ratio.split(':', 1)))
+            return cast(
+                tuple[int, int],
+                tuple(map(int, display_aspect_ratio.split(':', 1)))
+            )
         else:
             w, h = map(sample_meta.get, ('width', 'height'), (None, None))
             if None not in (w, h):
@@ -213,7 +227,7 @@ class AspectEstimator:
         if self._aspect is None:
             self._pool.close()
             self._pool.join()
-            sample_aspects = []
+            sample_aspects: list[tuple[int, int]] = []
             while not self._result_queue.empty():
                 sample_aspects.append(self._result_queue.get())
 
@@ -236,21 +250,21 @@ class AspectEstimator:
         return aspect
 
 
-def flatten(t: list[T], inplace: bool = False) -> list[T]:
-    flat_list = []
+def flatten[T](t: list[list[T]], inplace: bool = False) -> list[T]:
+    flat_list: list[T] = []
     for sublist in t:
         for item in sublist:
             flat_list.append(item)
     if inplace:
-        t[:] = flat_list
+        t[:] = flat_list  # type: ignore
     else:
-        t = flat_list
-    return t
+        t = flat_list  # type: ignore
+    return t  # type: ignore
 
 
 class _Replacement:
-    groupindex = type('groupindex', (), {'__getitem__': lambda self, _: 0})()
-    groups = re._parser.MAXGROUPS
+    groupindex = type('groupindex', (), {'__getitem__': lambda self, _: 0})()  # pyright: ignore[reportAssignmentType]
+    groups = re._parser.MAXGROUPS  # pyright: ignore[reportAttributeAccessIssue]
     string = ''
 
     def __init__(self, replacements: dict[int | str, str] | Iterable[str]):
@@ -262,9 +276,9 @@ class _Replacement:
             for k, v in tuple(replacements.items()):
                 if isinstance(k, str):
                     self.groupindex[k] = count
-                    replacements[count] = v
+                    replacements[count] = v  # pyright: ignore[reportArgumentType]
                     count -= 1
-        self._data: dict[int | str, str] = replacements
+        self._data: dict[int | str, str] = replacements  # pyright: ignore[reportAttributeAccessIssue]
 
     def group(self, name: int | str) -> str:
         return self._data[name]
@@ -274,13 +288,13 @@ def expand_template(
         template: str, replacements: dict[int | str, str] | Iterable[str]
 ) -> str:
     r = _Replacement(replacements)
-    template = re._parser.parse_template(template, r)
+    template = re._parser.parse_template(template, r)  # pyright: ignore[reportAttributeAccessIssue]
     expanded = ''.join(r.group(part) if isinstance(part, int) else part for part in template)
     # expanded = re._parser.expand_template(template, r)
     return expanded
 
 
-def sampled(dataset: Sequence[T], sample_size: Optional[int] = 3) -> list[T]:
+def sampled[T](dataset: Sequence[T], sample_size: Optional[int] = 3) -> list[T]:
     if sample_size is None:
         return list(dataset)
     n = len(dataset)
@@ -289,6 +303,17 @@ def sampled(dataset: Sequence[T], sample_size: Optional[int] = 3) -> list[T]:
     step_size = n / sample_size
     result = [dataset[0], *(dataset[int(i * step_size)] for i in range(1, sample_size))]
     return result
+
+
+def initialize_vlc4():
+    import os
+    import ctypes
+    import ctypes.util
+    # Add VLC library directory to DYLD_LIBRARY_PATH
+    vlc_lib_path = "/Applications/VLC.app/Contents/Frameworks/"
+    os.environ["DYLD_LIBRARY_PATH"] = vlc_lib_path + ":" + os.environ.get("DYLD_LIBRARY_PATH", "")
+    ctypes.CDLL(ctypes.util.find_library('vlccore'))
+    ctypes.CDLL(ctypes.util.find_library('vlc'))
 
 
 class ByteStreamReader:

@@ -14,13 +14,16 @@ from PyQt6.QtCore import (
     QTimer, Qt, QThread, pyqtSignal, pyqtSlot, QPropertyAnimation, QObject, QEvent, QUrl, QFileInfo,
     QTemporaryDir, QMutex
 )
+from PyQt6.QtMultimedia import QMediaPlayer
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtGui import QFont
-
-import vlc
 
 from . import AlbumReader
 from . import FFMPEGObject
 from . import utils
+utils.initialize_vlc4()
+import vlc  # noqa: E402
+USE_VLC = True
 
 logger = utils.get_logger('SlideShow.GUIPyQt6FFMPEG')
 
@@ -54,16 +57,18 @@ class VLCMediaPlayer(QObject):
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent=parent)
         self._instance = vlc.Instance('--verbose -1')
-        self._player = self._instance.media_player_new()
+        self._player = self._instance.media_player_new()  # pyright: ignore[reportOptionalMemberAccess]
         self._timer = QTimer(self)
         self._timer.setInterval(200)
         self._is_playing = False
+        self._show_subtitle = False
         # self._timer.timeout.connect(self.update_mediaStatusChanged)
         self.event_manager = self._player.event_manager()
         self.event_manager.event_attach(
             vlc.EventType.MediaPlayerEndReached,  # type: ignore
             lambda e: self.mediaStatusChanged.emit(self.MediaStatus.EndOfMedia)
         )
+        # self.mediaStatusChanged.connect(self._showSubtitle)
 
     def setVideoOutput(self, video_widget) -> None:
         if sys.platform.startswith('linux'):  # for Linux using the X Server
@@ -73,8 +78,8 @@ class VLCMediaPlayer(QObject):
         elif sys.platform == "darwin":  # for MacOS
             self._player.set_nsobject(int(video_widget.winId()))
 
-    def setSource(self, media) -> None:
-        self.media = self._instance.media_new(media.url())
+    def setSource(self, media: QUrl) -> None:
+        self.media = self._instance.media_new(media.url())  # pyright: ignore[reportOptionalMemberAccess]
         self._player.set_media(self.media)
         # self._player.play()
         self._player.pause()
@@ -84,7 +89,18 @@ class VLCMediaPlayer(QObject):
         self._timer.start()
         self._is_playing = True
 
-    def setPlaybackRate(self, v) -> None:
+    def _showSubtitle(self, status: int):
+        self.showSubtitle(visible=None)
+
+    def showSubtitle(self, visible: Optional[bool] = None):
+        if visible is None:
+            visible = self._show_subtitle
+        else:
+            self._show_subtitle = visible
+        track_num = 0 if visible else -1
+        self._player.video_set_spu(track_num)
+
+    def setPlaybackRate(self, v: float) -> None:
         self._player.set_rate(v)
 
     def update_mediaStatusChanged(self) -> None:
@@ -105,11 +121,13 @@ def _ffmpeg_read(
     size: tuple[int, int],
     dpath: str,
     segment_time: int = 10,
-    loglevel: Optional[FFMPEGObject.LogLevel] = None
+    loglevel: Optional[FFMPEGObject.LogLevel | bool] = None
 ) -> None:
     # with multiprocessing.Pool(None, limit_cpu) as pool:
     with multiprocessing.Pool(multiprocessing.cpu_count() - 1) as pool:
         logger.debug('Submmiting jobs to media processing queue...')
+        if isinstance(loglevel, str):
+            loglevel = loglevel.lower()  # pyright: ignore[reportAssignmentType]
         ffmpeg_object = FFMPEGObject.FFMPEGObjectLive(delay, size, loglevel=loglevel)
         index = 0
         skipped = 0
@@ -197,7 +215,7 @@ class ReadMediaThread(QThread):
         delay: float,
         size: tuple[int, int],
         dpath: str,
-        loglevel: Optional[FFMPEGObject.LogLevel] = None,
+        loglevel: Optional[FFMPEGObject.LogLevel | bool] = None,
         parent: Optional[QObject] = None
     ):
         super().__init__(parent)
@@ -206,7 +224,7 @@ class ReadMediaThread(QThread):
         self.delay = delay
         self.size = size
         self.dpath = dpath
-        self.loglevel: Optional[FFMPEGObject.LogLevel] = loglevel
+        self.loglevel: Optional[FFMPEGObject.LogLevel | bool] = loglevel
 
     def run(self) -> None:
         logger.debug('Initializing video thread...')
@@ -347,9 +365,12 @@ class App(Resizable):
         self.setLayout(self.Layout)
 
         # video
-        self.MediaPlayer = VLCMediaPlayer(self)
-
-        self.VideoWidget = QFrame(self)
+        if USE_VLC:
+            self.MediaPlayer = VLCMediaPlayer(self)
+            self.VideoWidget = QFrame(self)
+        else:
+            self.MediaPlayer = QMediaPlayer(self)
+            self.VideoWidget = QVideoWidget(self)
 
         self.Layout.addWidget(self.VideoWidget)
         self.MediaPlayer.setVideoOutput(self.VideoWidget)
@@ -460,8 +481,9 @@ class App(Resizable):
             self.showFullScreen()
 
     def toggle_debug(self) -> None:
-        debug_is_visible = self.debug_info.isVisible()
-        self.debug_info.setVisible(not debug_is_visible)
+        debug_is_visible = not self.debug_info.isVisible()
+        self.debug_info.setVisible(debug_is_visible)
+        self.MediaPlayer.showSubtitle(debug_is_visible)  # pyright: ignore[reportAttributeAccessIssue]
 
     def end_of_media(self, status) -> None:
         if status == self.MediaPlayer.MediaStatus.EndOfMedia:
@@ -529,8 +551,8 @@ class App(Resizable):
                 width = int(cast(int, height) / aspect_ratio)
         self.media_size: tuple[int, int] = (cast(int, width), cast(int, height))
 
-    def get_ffmpeg_loglevel(self) -> Optional[Literal[FFMPEGObject.LogLevel]]:
+    def get_ffmpeg_loglevel(self) -> Optional[Literal[FFMPEGObject.LogLevel] | bool]:
         return self.media_thread.loglevel
 
-    def set_ffmpeg_loglevel(self, value: Optional[FFMPEGObject.LogLevel] = None) -> None:
+    def set_ffmpeg_loglevel(self, value: Optional[FFMPEGObject.LogLevel | bool] = None) -> None:
         self.media_thread.loglevel = value
