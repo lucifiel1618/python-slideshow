@@ -1,7 +1,7 @@
 import abc
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, NotRequired, Optional, TypedDict, override
+from typing import Any, Iterable, Iterator, NotRequired, Optional, TypedDict, override
 
 # =====================
 # ENUM CLASSES
@@ -47,7 +47,7 @@ class SubtitleEntry(TypedDict):
 
 
 class Subtitle(abc.ABC):
-    SUFFIX = '.srt'
+    SUFFIX = '.nullsub'
 
     def __init__(
         self,
@@ -127,13 +127,15 @@ class Subtitle(abc.ABC):
         for e in self.entries:
             yield from self.get_event(e)
 
+    def timeline(self) -> Iterator[tuple[float, str]]:
+        for e in self.entries:
+            yield e['start_time'], e['text']
+
     def injected[T](self, ffmpeg_stream: T) -> T:
         return ffmpeg_stream.filter("subtitles", str(self.export_path))  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class NullSubtitle(Subtitle):
-    SUFFIX = '.nullsub'
-
     def __init__(
         self,
         w: int = 1920,
@@ -145,7 +147,7 @@ class NullSubtitle(Subtitle):
         back_color: Any = None,
         alignment: Any = None
     ):
-        ...
+        self.entries = []
 
     @override
     def export(self, filepath: Optional[Path] = None):
@@ -173,6 +175,19 @@ class NullSubtitle(Subtitle):
     @classmethod
     def get_event(cls, entry: SubtitleEntry) -> list[str]:
         return []
+
+    @override
+    def injected[T](self, ffmpeg_stream: T) -> T:
+        return ffmpeg_stream
+
+
+class InternalSubtitle(Subtitle):
+    @classmethod
+    def get_event(cls, entry: SubtitleEntry) -> list[str]:
+        return [entry['text']]
+
+    def _export(self, filepath: Path):
+        ...
 
     @override
     def injected[T](self, ffmpeg_stream: T) -> T:

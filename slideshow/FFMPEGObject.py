@@ -4,7 +4,7 @@ from xml.etree import ElementTree as ET
 from pathlib import Path
 import shutil
 import functools
-from typing import Iterable, Literal, Optional, Callable, Any, Sequence, TypedDict, cast
+from typing import Iterable, Literal, NotRequired, Optional, Callable, Any, Sequence, TypedDict, cast
 import ffmpeg
 
 from slideshow import Subtitle
@@ -12,7 +12,7 @@ from slideshow import Subtitle
 from . import utils
 
 
-SUBTITLER = Subtitle.NullSubtitle
+SUBTITLER = Subtitle.InternalSubtitle
 
 
 def find_executable(executable_name: str) -> str:
@@ -333,8 +333,9 @@ class FFMPEGObject[T]:
         fname: Path,
         outstream: ffmpeg.nodes.FilterableStream,
         temp_fname: Optional[str] = None,
-        callback: Optional[Callable[[str], T]] = None,
+        callback: Optional[Callable[[str, Optional[dict[str, Any]]], T]] = None,
         *,
+        meta: Optional[dict[str, Any]] = None,
         logger=None
     ) -> T | None:
         _fname = temp_fname if temp_fname is not None else fname
@@ -345,10 +346,10 @@ class FFMPEGObject[T]:
         if temp_fname is not None:
             shutil.move(_fname, fname)
         if callback is not None:
-            return callback(str(fname))
+            return callback(str(fname), meta)
 
     @staticmethod
-    def callback(fname: str, *, meta: Optional[dict[str, Any]] = None) -> T:
+    def callback(fname: str, meta: Optional[dict[str, Any]] = None) -> T:
         ...
 
     def compile_call(
@@ -356,6 +357,7 @@ class FFMPEGObject[T]:
         path: Path,
         temp_path: Optional[Path] = None,
         *,
+        meta: Optional[dict[str, Any]] = None,
         logger=None
     ) -> Callable[[], T]:
         _path = temp_path if temp_path is not None else path
@@ -364,8 +366,8 @@ class FFMPEGObject[T]:
         callback = self.callback
         self.logger.detail(f'Prepare {path}')
         f: Callable[[], T] = functools.partial(
-            self._compile_call, path, outstream, temp_fname, callback, logger=logger
-        )  # type: ignore
+            self._compile_call, path, outstream, temp_fname, callback, meta=meta, logger=logger   # type: ignore
+        )
 
         return f
 
@@ -472,9 +474,10 @@ class FFMPEGObject[T]:
 class VideoMeta(TypedDict):
     tag: str
     content: str
+    meta: NotRequired[Optional[dict[str, Any]]]
 
 
-class FFMPEGObjectLive(FFMPEGObject):
+class FFMPEGObjectLive(FFMPEGObject[VideoMeta]):
     def __init__(
         self,
         delay: float,
@@ -495,10 +498,8 @@ class FFMPEGObjectLive(FFMPEGObject):
         )
 
     @staticmethod
-    def callback(fname: str, *, meta: Optional[dict[str, Any]] = None) -> VideoMeta:
-        _meta: VideoMeta = {'tag': 'video', 'content': fname}
-        if meta is not None:
-            _meta.update(**meta)
+    def callback(fname: str, meta: Optional[dict[str, Any]] = None) -> VideoMeta:
+        _meta: VideoMeta = {'tag': 'video', 'content': fname, 'meta': meta}
         subtitle_file = Path(fname).with_suffix(SUBTITLER.SUFFIX)
         subtitle_file.unlink(missing_ok=True)
         return _meta

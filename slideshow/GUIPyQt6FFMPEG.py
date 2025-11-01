@@ -1,3 +1,4 @@
+import bisect
 from fractions import Fraction
 from multiprocessing.pool import AsyncResult
 import sys
@@ -6,7 +7,7 @@ from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 import multiprocessing
 import queue
-from typing import Iterable, Callable, Literal, NoReturn, Optional, Self, TypedDict, cast, Sequence
+from typing import Any, Iterable, Callable, Literal, NoReturn, Optional, Self, TypedDict, cast, Sequence
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QLabel, QGraphicsOpacityEffect, QWidget, QHBoxLayout, QFrame
@@ -50,6 +51,7 @@ class Application:
 
 class VLCMediaPlayer(QObject):
     mediaStatusChanged = pyqtSignal(int)
+
     MediaStatus = SimpleNamespace()
     MediaStatus.EndOfMedia = 6
     MediaStatus.OtherStatus = 0
@@ -58,13 +60,14 @@ class VLCMediaPlayer(QObject):
         super().__init__(parent=parent)
         self._instance = vlc.Instance('--verbose -1')
         self._player = self._instance.media_player_new()  # pyright: ignore[reportOptionalMemberAccess]
-        self._timer = QTimer(self)
-        self._timer.setInterval(200)
+        # self._timer = QTimer(self)
+        # self._timer.setInterval(200)
         self._is_playing = False
         self._show_subtitle = False
+        self.events = {}
         # self._timer.timeout.connect(self.update_mediaStatusChanged)
         self.event_manager = self._player.event_manager()
-        self.event_manager.event_attach(
+        self.events['end_of_media'] = self.event_manager.event_attach(
             vlc.EventType.MediaPlayerEndReached,  # type: ignore
             lambda e: self.mediaStatusChanged.emit(self.MediaStatus.EndOfMedia)
         )
@@ -86,7 +89,7 @@ class VLCMediaPlayer(QObject):
 
     def play(self) -> None:
         self._player.play()
-        self._timer.start()
+        # self._timer.start()
         self._is_playing = True
 
     def _showSubtitle(self, status: int):
@@ -108,6 +111,16 @@ class VLCMediaPlayer(QObject):
         if is_playing != self._is_playing:
             self._is_playing = is_playing
             self.mediaStatusChanged.emit(self.MediaStatus.OtherStatus if is_playing else self.MediaStatus.EndOfMedia)
+
+    def attachTimer(self, c: Callable[[float], Any]):
+        self.events['time_changed'] = self.event_manager.event_attach(
+            vlc.EventType.MediaPlayerTimeChanged, lambda ev: c(ev.u.new_time)
+        )
+
+    def deattachTimer(self):
+        if 'time_changed' in self.events:
+            self.event_manager.event_detach(vlc.EventType.MediaPlayerTimeChanged, self.events['time_changed'])
+            del self.events['time_changed']
 
 
 def process_meta(command: str) -> FFMPEGObject.VideoMeta:
@@ -148,7 +161,14 @@ def _ffmpeg_read(
                     qput = queue.put
                     fname = f'{dpath}/{index:0>4}.ts'
                 logger.detail(f'Queuing `{fname}`')
-                qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
+                qput(
+                    pool.apply_async(
+                        ffmpeg_object.compile_call(
+                            fname,  # pyright: ignore[reportArgumentType]
+                            meta={'timeline': list(ffmpeg_object.subtitler.timeline())}
+                        )
+                    )
+                )  # type: ignore
                 ffmpeg_object.reset()
                 index += 1
             logger.detail(f'End processing {media}...')
@@ -159,7 +179,14 @@ def _ffmpeg_read(
             else:
                 qput = queue.put
                 fname = f'{dpath}/{index:0>4}.ts'
-            qput(pool.apply_async(ffmpeg_object.compile_call(fname)))  # type: ignore
+            qput(
+                pool.apply_async(
+                    ffmpeg_object.compile_call(
+                        fname,  # pyright: ignore[reportArgumentType]
+                        meta={'timeline': list(ffmpeg_object.subtitler.timeline())}
+                    )
+                )
+            )  # type: ignore
         pool.close()
         logger.debug('Submmiting jobs to media processing queue finished. Waiting for jobs to end...')
         pool.join()
@@ -249,7 +276,7 @@ class Resizable(QWidget):
 class StdInfo(QLabel):
     def __init__(
         self,
-        text_func: Callable[[], str] | str,
+        text_func: Callable[[*tuple[str, ...]], str] | Callable[[], str] | str,
         font: QFont = QFont('Arial', 36),
         align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
         animated: bool = True,
@@ -298,8 +325,8 @@ class StdInfo(QLabel):
             pos = (x, y)
         self.move(*pos)
 
-    def display_func(self, *x) -> None:
-        text_func = cast(Callable, self.text_func)
+    def display_func(self, *x: str) -> None:
+        text_func = cast(Callable[[*tuple[str, ...]], str], self.text_func)
         self.setText(text_func(*x))
         self.adjustSize()
         self.set_position()
@@ -322,7 +349,8 @@ class StdInfo(QLabel):
 
 class App(Resizable):
     _changed_playspeed = pyqtSignal()
-    _play_now = pyqtSignal(str)
+    _play_now_signal = pyqtSignal(str)
+    _play_now_source_signal = pyqtSignal(str)
     _keyPressed = pyqtSignal(QEvent)
 
     def __init__(
@@ -335,28 +363,11 @@ class App(Resizable):
         parent: Optional[QWidget] = None
     ):
         super().__init__(parent)
-
         self.status: bool = True
         self.delay: int = delay
         self.rate: float = rate
-        self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files, chapters=chapters)
+        self.play_now = ['', '']
         self.set_size()
-        self.queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]] = queue.Queue(qsize)
-        self._tempd = QTemporaryDir()
-        self.destroyed.connect(self._tempd.remove)  # type: ignore
-        self._played: list[str] = []
-        self.media_thread: ReadMediaThread = ReadMediaThread(
-            self.queue,
-            iter(self.album),
-            self.delay,
-            self.media_size,
-            self._tempd.path(),
-            parent=self,
-            loglevel=utils.FFMPEG_LOGLEVEL
-        )
-        self.destroyed.connect(self.media_thread.terminate)
-
-        self._keyPressed.connect(self.on_key)
 
         # layout
         self.Layout = QHBoxLayout(self)
@@ -377,6 +388,36 @@ class App(Resizable):
         self.MediaPlayer.setPlaybackRate(self.rate)
         self.MediaPlayer.mediaStatusChanged.connect(self.end_of_media)
 
+        self.loading_info: StdInfo = StdInfo(
+            'Loading...',
+            QFont('Arial', 108),
+            align=Qt.AlignmentFlag.AlignCenter,
+            animated=False,
+            parent=self
+        )
+        self.setVisible(True)
+
+        self.loading_info.display()
+
+        self.queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]] = queue.Queue(qsize)
+        self._tempd = QTemporaryDir()
+        self.destroyed.connect(self._tempd.remove)  # type: ignore
+        self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files, chapters=chapters)
+        self.media_thread: ReadMediaThread = ReadMediaThread(
+            self.queue,
+            iter(self.album),
+            self.delay,
+            self.media_size,
+            self._tempd.path(),
+            parent=self,
+            loglevel=utils.FFMPEG_LOGLEVEL
+        )
+        self.destroyed.connect(self.media_thread.terminate)
+
+        self._keyPressed.connect(self.on_key)
+
+        self.timeline: list[tuple[float, str]] = []
+
         # info
         self.info_fps = StdInfo(
             lambda: f'fps: {1000. / self.delay * self.rate:.1f}',
@@ -392,20 +433,21 @@ class App(Resizable):
         self._changed_playspeed.connect(self.info_playspeed.display)
         self._changed_playspeed.emit()
 
+        def debug_info_text_func(fpath: str, sourcepath: str) -> str:
+            lines = []
+            fp = Path(fpath)
+            lines.append(f'path: {fp.relative_to(".") if fp.is_relative_to(".") else fp!s}')
+            if sourcepath:
+                sp = Path(sourcepath)
+                lines.append(f'source: {sp.relative_to(".") if sp.is_relative_to(".") else sp!s}')
+            return '\n'.join(lines)
+
         self.debug_info: StdInfo = StdInfo(
-            lambda x: f'path: {Path(x).relative_to(".") if Path(x).is_relative_to(".") else x:s}',   # type: ignore
+            debug_info_text_func,
             align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             animated=False,
             font=QFont('Arial', 24),
             parent=self)
-
-        self.loading_info: StdInfo = StdInfo(
-            'Loading...',
-            QFont('Arial', 108),
-            align=Qt.AlignmentFlag.AlignCenter,
-            animated=False,
-            parent=self
-        )
 
         self.end_info: StdInfo = StdInfo(
             'End',
@@ -414,12 +456,12 @@ class App(Resizable):
             parent=self
         )
 
-        self._play_now[str].connect(self.debug_info.display)
-        self._play_now[str].connect(self.clean_up)
-        self.loading_info.display()
+        self._play_now_signal[str].connect(lambda s: self.play_now.__setitem__(0, s))
+        self._play_now_signal[str].connect(self.clean_up)
+        self._play_now_source_signal[str].connect(lambda s: self.play_now.__setitem__(1, s))
         self.end_info.hide()
         self.debug_info.hide()
-        self.setVisible(True)
+
         for meta in self.album.preprocess_meta():
             cmd = meta.get('command')
             logger.info(f'Executing App.{cmd}')
@@ -472,7 +514,7 @@ class App(Resizable):
                 self.toggle_debug()
             case Qt.Key.Key_Return:
                 if e.modifiers() == Qt.KeyboardModifier.ControlModifier:  # Ctrl + Enter: Toggle Full Screen
-                    self.toggle
+                    self.toggle()
 
     def toggle(self) -> None:
         if self.isFullScreen():
@@ -480,10 +522,28 @@ class App(Resizable):
         else:
             self.showFullScreen()
 
+    def play_now_source_by_time(self, time: float):
+        i = bisect.bisect_right(self.timeline, time, key=lambda en: en[0])
+        source = ''
+        try:
+            source = self.timeline[i][1]
+        except IndexError:
+            source = self.timeline[-1][1]
+        if self.play_now[1] != source:
+            self._play_now_source_signal.emit(source)
+            self.play_now[1] = source
+            self.debug_info.display(*self.play_now)
+
     def toggle_debug(self) -> None:
         debug_is_visible = not self.debug_info.isVisible()
         self.debug_info.setVisible(debug_is_visible)
-        self.MediaPlayer.showSubtitle(debug_is_visible)  # pyright: ignore[reportAttributeAccessIssue]
+        if isinstance(self.MediaPlayer, VLCMediaPlayer):
+            if debug_is_visible:
+                print(f'{self.timeline=}')
+                self.MediaPlayer.attachTimer(self.play_now_source_by_time)
+            else:
+                self.MediaPlayer.deattachTimer()
+        # self.MediaPlayer.showSubtitle(debug_is_visible)  # pyright: ignore[reportAttributeAccessIssue]
 
     def end_of_media(self, status) -> None:
         if status == self.MediaPlayer.MediaStatus.EndOfMedia:
@@ -515,9 +575,11 @@ class App(Resizable):
             self.play_next()
             return
 
-        self._play_now.emit(content)
+        self._play_now_signal.emit(content)
+        self.debug_info.display(*self.play_now)
         url = QUrl.fromLocalFile(QFileInfo(content).absoluteFilePath())
         self.MediaPlayer.setSource(url)
+        self.timeline = cast(dict[str, list[tuple[float, str]]], entry.get('meta', {'timeline': []}))['timeline']
         if first:
             self.loading_info.hide()
         self.MediaPlayer.play()

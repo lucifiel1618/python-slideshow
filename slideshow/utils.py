@@ -72,7 +72,7 @@ def _addLoggingLevel(levelName: str, levelNum: int, methodName: Optional[str] = 
 _addLoggingLevel('DETAIL', logging.DEBUG - 5)
 
 
-class DetailLogger(logging.Logger, Protocol):  # pyright: ignore[reportGeneralTypeIssues]
+class DetailLogger(logging.Logger):  # pyright: ignore[reportGeneralTypeIssues]
     def detail(
         self,
         msg: object,
