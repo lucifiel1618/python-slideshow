@@ -3,11 +3,10 @@ from fractions import Fraction
 from multiprocessing.pool import AsyncResult
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 import multiprocessing
 import queue
-from typing import Any, Iterable, Callable, Literal, NoReturn, Optional, Self, TypedDict, cast, Sequence
+from typing import Iterable, Callable, Literal, NoReturn, Optional, Self, TypedDict, cast, Sequence
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QLabel, QGraphicsOpacityEffect, QWidget, QHBoxLayout, QFrame
@@ -51,17 +50,32 @@ class Application:
 
 class VLCMediaPlayer(QObject):
     mediaStatusChanged = pyqtSignal(int)
+    playTimeSignal = pyqtSignal(float)
 
-    MediaStatus = SimpleNamespace()
-    MediaStatus.EndOfMedia = 6
-    MediaStatus.OtherStatus = 0
+    class MediaStatus:
+        EndOfMedia = 6
+        Paused = 4
+        Playing = 3
+        OtherStatus = 0
+        MediaPlayerEndReached = 7
+
+        @classmethod
+        def get_state(cls, vlc_state):
+            match vlc_state:
+                case vlc.State.Ended:
+                    state = cls.EndOfMedia
+                case vlc.State.Paused:
+                    state = cls.Paused
+                case vlc.State.Playing:
+                    state = cls.Playing
+                case _:
+                    state = cls.OtherStatus
+            return state
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent=parent)
         self._instance = vlc.Instance('--verbose -1')
         self._player = self._instance.media_player_new()  # pyright: ignore[reportOptionalMemberAccess]
-        # self._timer = QTimer(self)
-        # self._timer.setInterval(200)
         self._is_playing = False
         self._show_subtitle = False
         self.events: dict[str, int] = {}
@@ -72,6 +86,16 @@ class VLCMediaPlayer(QObject):
             lambda e: self.mediaStatusChanged.emit(self.MediaStatus.EndOfMedia)
         )
         # self.mediaStatusChanged.connect(self._showSubtitle)
+        self.playTime = 0
+        self._tick_interval = 50
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.playTimetick)
+        self._timer.setInterval(self._tick_interval)
+
+    def playTimetick(self):
+        if self._is_playing:
+            self.playTime += self._tick_interval
+            self.playTimeSignal.emit(self.playTime / 1000)
 
     def setVideoOutput(self, video_widget) -> None:
         if sys.platform.startswith('linux'):  # for Linux using the X Server
@@ -84,13 +108,18 @@ class VLCMediaPlayer(QObject):
     def setSource(self, media: QUrl) -> None:
         self.media = self._instance.media_new(media.url())  # pyright: ignore[reportOptionalMemberAccess]
         self._player.set_media(self.media)
-        # self._player.play()
-        self._player.pause()
+        self.pause()
+        self.playTime = 0
 
     def play(self) -> None:
         self._player.play()
-        # self._timer.start()
+        self._timer.start()
         self._is_playing = True
+
+    def pause(self) -> None:
+        self._player.pause()
+        self._timer.stop()
+        self._is_playing = False
 
     def _showSubtitle(self, status: int):
         self.showSubtitle(visible=None)
@@ -104,23 +133,30 @@ class VLCMediaPlayer(QObject):
         self._player.video_set_spu(track_num)
 
     def setPlaybackRate(self, v: float) -> None:
-        self._player.set_rate(v)
+        if v == 0.:
+            self.pause()
+        else:
+            self._player.set_rate(v)
+            self.play()
 
-    def update_mediaStatusChanged(self) -> None:
-        is_playing = self._player.is_playing()
-        if is_playing != self._is_playing:
-            self._is_playing = is_playing
-            self.mediaStatusChanged.emit(self.MediaStatus.OtherStatus if is_playing else self.MediaStatus.EndOfMedia)
+    # def update_mediaStatusChanged(self) -> None:
+    #     is_playing = self._player.is_playing()
+    #     if is_playing == self._is_playing:
+    #         return
+    #     self._is_playing = is_playing
+    #     self.mediaStatusChanged.emit(self.MediaStatus.get_state(self._player.get_state()))
 
-    def attachTimer(self, c: Callable[[float], Any]):
-        self.events['time_changed'] = self.event_manager.event_attach(
-            vlc.EventType.MediaPlayerTimeChanged, lambda ev: c(ev.u.new_time)
-        )
+    def attachTimer(self):
+        def _f(ev):
+            self.playTime = ev.u.new_time
+        self.events['time_changed'] = self.event_manager.event_attach(vlc.EventType.MediaPlayerTimeChanged, _f)
+        self._timer.start()
 
     def deattachTimer(self):
         if 'time_changed' in self.events:
             self.event_manager.event_detach(vlc.EventType.MediaPlayerTimeChanged)
             del self.events['time_changed']
+        self._timer.stop()
 
 
 def process_meta(command: str) -> FFMPEGObject.VideoMeta:
@@ -389,6 +425,7 @@ class App(Resizable):
         if USE_VLC:
             self.MediaPlayer = VLCMediaPlayer(self)
             self.VideoWidget = QFrame(self)
+            self.MediaPlayer.playTimeSignal.connect(self.play_now_source_by_time)
         else:
             self.MediaPlayer = QMediaPlayer(self)
             self.VideoWidget = QVideoWidget(self)
@@ -506,8 +543,6 @@ class App(Resizable):
                 self.MediaPlayer.setPlaybackRate(self.rate)
         else:
             self.MediaPlayer.setPlaybackRate(0)
-            if self.debug_info.isVisible():
-                self.play_now_source_by_time(self.MediaPlayer._player.get_time())
 
     def on_key(self, e) -> None:
         match e.key():
@@ -528,7 +563,8 @@ class App(Resizable):
             case Qt.Key.Key_D:
                 self.toggle_debug()
             case Qt.Key.Key_Return:
-                if e.modifiers() == Qt.KeyboardModifier.ControlModifier:  # Ctrl + Enter: Toggle Full Screen
+                # Ctrl + Enter: Toggle Full Screen
+                if e.modifiers() == Qt.KeyboardModifier.ControlModifier:
                     self.toggle()
 
     def toggle(self) -> None:
@@ -538,30 +574,26 @@ class App(Resizable):
             self.showFullScreen()
 
     def play_now_source_by_time(self, time: float):
-        i = bisect.bisect_right(self.timeline, time, key=lambda en: en[0])
-        source = ''
-        try:
-            source = self.timeline[i][1]
-        except IndexError:
-            source = self.timeline[-1][1]
+        i = bisect.bisect_right(self.timeline, time, key=lambda en: en[0]) - 1
+        source = self.timeline[i][1]
         if self.play_now[1] != source:
             self._play_now_source_signal.emit(source)
             self.play_now[1] = source
             if self.debug_info.isVisible():
                 self.debug_info.display(*self.play_now)
-            # self.debug_info_test.setText(self.debug_info_text_func(*self.play_now))
 
     def toggle_debug(self) -> None:
         debug_is_visible = not self.debug_info.isVisible()
         self.debug_info.setVisible(debug_is_visible)
         if isinstance(self.MediaPlayer, VLCMediaPlayer):
             if debug_is_visible:
-                self.MediaPlayer.attachTimer(self.play_now_source_by_time)
+                self.MediaPlayer.attachTimer()
             else:
                 self.MediaPlayer.deattachTimer()
         # self.MediaPlayer.showSubtitle(debug_is_visible)  # pyright: ignore[reportAttributeAccessIssue]
 
     def end_of_media(self, status) -> None:
+        print(f'{status=}')
         if status == self.MediaPlayer.MediaStatus.EndOfMedia:
             self.play_next()
 
