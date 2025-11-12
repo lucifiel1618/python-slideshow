@@ -31,8 +31,8 @@ def find_executable(executable_name: str) -> str:
             return f'/opt/homebrew/bin/{executable_name}'
 
 
-FFMPEG_BIN = find_executable('ffmpeg@5')
-FFPROBE_BIN = find_executable('ffprobe@5')
+FFMPEG_BIN = find_executable('ffmpeg@8')
+FFPROBE_BIN = find_executable('ffprobe@8')
 
 
 LogLevel = Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'QUIET']

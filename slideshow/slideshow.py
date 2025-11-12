@@ -84,6 +84,7 @@ def main() -> None:
             backend_parser.add_argument('--dstdir', help='Root directory of output video files')
             backend_parser.add_argument('--port', default=8000, type=int, help='Port')
         if backend == 'template':
+            backend_parser.add_argument('-a', '--aspect', default=None, help='Aspect ratio')
             backend_parser.add_argument('-o', '--output', default=[], action='append', help='Output file name')
             backend_parser.add_argument('--empty', action='store_true',
                                         help='Files will not be imported if `empty` is set.')
@@ -204,6 +205,7 @@ def main() -> None:
             reg.setdefault(rkey, []).append(rval)
         AlbumReader.AlbumReader.make_template(
             d,
+            aspect=args.aspect,
             reg=reg,
             empty=args.empty,
             output=args.output or None,

@@ -5,10 +5,12 @@ import logging
 import math
 import multiprocessing as mp
 from pathlib import Path
+import platform
 import random
 import re
 
-from typing import Callable, Iterable, Iterator, Literal, Mapping, Optional, Protocol, Self, Sequence, cast
+import subprocess
+from typing import Callable, Iterable, Iterator, Literal, Mapping, Optional, Self, Sequence, cast
 
 from PIL import Image
 import ffmpeg
@@ -159,20 +161,18 @@ def rescaled(image, size, result, i=0, fmt=None):
 
 
 class AspectEstimator:
-    def __init__(self, prop: float = 0.1, default_aspect: Optional[tuple[int, int] | Literal['auto']] = None):
+    def __init__(self, prop: float = 0.1, default_aspect: Optional[tuple[int, int] | Literal['auto'] | str] = None):
         self.logger = get_logger('AspectEstimator')
+        if isinstance(default_aspect, str):
+            default_aspect = self.get_aspect_from_str(default_aspect)
         self._aspect: Optional[tuple[int, int] | Literal['auto']] = default_aspect
         self._prop: float
         self._add_sample_aspect: Callable[[mp.Queue[tuple[int, int]], str], None]
         self.set_prop(prop)
 
-        self._pool: mp.pool.Pool  # pyright: ignore[reportAttributeAccessIssue]
-        self._manager: mp.managers.SyncManager  # pyright: ignore[reportAttributeAccessIssue]
-        self._result_queue: mp.Queue[tuple[int, int]]
-        if self._prop != 0:
-            self._pool = mp.Pool()
-            self._manager = mp.Manager()
-            self._result_queue = self._manager.Queue()
+        self._pool: mp.pool.Pool = mp.Pool()
+        self._manager: mp.managers.SyncManager = mp.Manager()
+        self._result_queue: mp.Queue[tuple[int, int]] = self._manager.Queue()
 
     @property
     def prop(self) -> float:
@@ -247,6 +247,11 @@ class AspectEstimator:
             aspect = aspect
         else:
             aspect = 'X'.join(map(str, aspect))
+        return aspect
+
+    @staticmethod
+    def get_aspect_from_str(aspect_str: str) -> tuple[int, int]:
+        aspect = cast(tuple[int, int], tuple(map(int, aspect_str.upper().split('X', 1))))
         return aspect
 
 
@@ -370,3 +375,29 @@ class ByteStreamReader:
         if end > self._stream_end:
             return bytes(self.stream) + self.read(self._stream_end + 1, end)
         return bytes(self.stream[:end - start + 1])
+
+
+def reveal_in_file_manager(path: Path):
+    """
+    Reveal the given file or folder in the system's file manager.
+    Works on macOS, Windows, and Linux (GNOME/KDE).
+    """
+    if not path.exists():
+        print(f"Path not found: {path}")
+        return
+    system = platform.system()
+    try:
+        if system == "Darwin":  # macOS
+            cmd = ["open", "-R", str(path)]
+        elif system == "Windows":
+            # explorer needs backslashes and absolute path
+            cmd = ["explorer", "/select,", str(path.resolve())]
+        elif system == "Linux":
+            # Reveal folder, not file — works with xdg-open, Nautilus, etc.
+            folder = path if path.is_dir() else path.parent
+            cmd = ["xdg-open", str(folder)]
+        else:
+            print(f"Unsupported OS: {system}")
+        subprocess.run(cmd, check=False)
+    except Exception as e:
+        print(f"Failed to reveal {path}: {e}")

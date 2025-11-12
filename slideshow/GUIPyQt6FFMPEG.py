@@ -12,8 +12,8 @@ from typing import Any, Iterable, Callable, Literal, NoReturn, Optional, Self, T
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QLabel, QGraphicsOpacityEffect, QWidget, QHBoxLayout, QFrame
 from PyQt6.QtCore import (
-    QTimer, Qt, QThread, pyqtSignal, pyqtSlot, QPropertyAnimation, QObject, QEvent, QUrl, QFileInfo,
-    QTemporaryDir, QMutex
+    Qt, QThread, pyqtSignal, pyqtSlot, QPropertyAnimation, QObject, QEvent, QUrl, QFileInfo,
+    QTemporaryDir, QMutex, QTimer
 )
 from PyQt6.QtMultimedia import QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -64,7 +64,7 @@ class VLCMediaPlayer(QObject):
         # self._timer.setInterval(200)
         self._is_playing = False
         self._show_subtitle = False
-        self.events = {}
+        self.events: dict[str, int] = {}
         # self._timer.timeout.connect(self.update_mediaStatusChanged)
         self.event_manager = self._player.event_manager()
         self.events['end_of_media'] = self.event_manager.event_attach(
@@ -119,7 +119,7 @@ class VLCMediaPlayer(QObject):
 
     def deattachTimer(self):
         if 'time_changed' in self.events:
-            self.event_manager.event_detach(vlc.EventType.MediaPlayerTimeChanged, self.events['time_changed'])
+            self.event_manager.event_detach(vlc.EventType.MediaPlayerTimeChanged)
             del self.events['time_changed']
 
 
@@ -260,7 +260,7 @@ class ReadMediaThread(QThread):
 
 
 class Resizable(QWidget):
-    resized = pyqtSignal()
+    resized = pyqtSignal(tuple)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -269,7 +269,8 @@ class Resizable(QWidget):
 
     def resizeEvent(self, event) -> None:
         ev = super().resizeEvent(event)
-        self.resized.emit()
+        coords = self.geometry().getRect()
+        self.resized.emit(coords)
         return ev
 
 
@@ -281,9 +282,10 @@ class StdInfo(QLabel):
         align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
         animated: bool = True,
         parent: Optional[Resizable] = None,
+        connect_resized: bool = True,
         **kwds
     ):
-        super().__init__(parent, **kwds)
+        super().__init__(parent=parent, **kwds)
         self.setStyleSheet('QLabel {color: gray;}')
         self.setStyleSheet('QLabel {background-color: rgba(0, 0, 0, 50);}')
         self.setFont(font)
@@ -299,12 +301,16 @@ class StdInfo(QLabel):
         self.anim.setEndValue(0.)
         # self.anim.setEasingCurve(QEasingCurve.OutQuad)
         self.anim.finished.connect(self.hide)
-        self.parent().resized.connect(self.set_position)  # type: ignore
+        if connect_resized and isinstance(parent, Resizable):
+            parent.resized.connect(self.set_position)  # type: ignore
 
-    @pyqtSlot()
-    def set_position(self, pos: Optional[tuple[int, int]] = None) -> None:
+    @pyqtSlot(tuple)
+    def set_position(
+        self,
+        coords: tuple[int, int, int, int],
+        pos: Optional[tuple[int, int]] = None
+    ) -> None:
         if pos is None:
-            coords: tuple[int, ...] = self.parent().geometry().getRect()  # type: ignore
             if self.align & Qt.AlignmentFlag.AlignLeft:
                 x = 0
             elif self.align & Qt.AlignmentFlag.AlignRight:
@@ -325,24 +331,28 @@ class StdInfo(QLabel):
             pos = (x, y)
         self.move(*pos)
 
+    def _ensure_main_thread(self, func, *args):
+        if QThread.currentThread() != self.thread():
+            QTimer.singleShot(0, lambda: func(*args))
+            return False
+        return True
+
     def display_func(self, *x: str) -> None:
+        if not self._ensure_main_thread(self.display_func, *x):
+            return
         text_func = cast(Callable[[*tuple[str, ...]], str], self.text_func)
-        self.setText(text_func(*x))
-        self.adjustSize()
-        self.set_position()
-        if self.animated:
-            self.show()
-            self.anim.stop()
-            self.anim.start()
+        text = text_func(*x)
+        self._display_text(text)
 
     def display_str(self) -> None:
         text = cast(str, self.text_func)
+        self._display_text(text)
+
+    def _display_text(self, text: str) -> None:
         self.setText(text)
         self.adjustSize()
-        self.set_position()
         if self.animated:
             self.show()
-            # self.anim.updateCurrentValue(1.)
             self.anim.stop()
             self.anim.start()
 
@@ -401,7 +411,7 @@ class App(Resizable):
 
         self.queue: queue.Queue[AsyncResult[FFMPEGObject.VideoMeta]] = queue.Queue(qsize)
         self._tempd = QTemporaryDir()
-        self.destroyed.connect(self._tempd.remove)  # type: ignore
+        # self.destroyed.connect(self._tempd.remove)  # type: ignore
         self.album: AlbumReader.AlbumReader = AlbumReader.AlbumReader(*media_files, chapters=chapters)
         self.media_thread: ReadMediaThread = ReadMediaThread(
             self.queue,
@@ -412,7 +422,7 @@ class App(Resizable):
             parent=self,
             loglevel=utils.FFMPEG_LOGLEVEL
         )
-        self.destroyed.connect(self.media_thread.terminate)
+        # self.destroyed.connect(self.media_thread.terminate)
 
         self._keyPressed.connect(self.on_key)
 
@@ -433,21 +443,24 @@ class App(Resizable):
         self._changed_playspeed.connect(self.info_playspeed.display)
         self._changed_playspeed.emit()
 
-        def debug_info_text_func(fpath: str, sourcepath: str) -> str:
-            lines = []
-            fp = Path(fpath)
-            lines.append(f'path: {fp.relative_to(".") if fp.is_relative_to(".") else fp!s}')
-            if sourcepath:
-                sp = Path(sourcepath)
-                lines.append(f'source: {sp.relative_to(".") if sp.is_relative_to(".") else sp!s}')
-            return '\n'.join(lines)
-
         self.debug_info: StdInfo = StdInfo(
-            debug_info_text_func,
+            self.debug_info_text_func,
             align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             animated=False,
             font=QFont('Arial', 24),
-            parent=self)
+            parent=self,
+            connect_resized=False
+        )
+
+        self.debug_info.setTextFormat(Qt.TextFormat.RichText)
+        self.debug_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.debug_info.setOpenExternalLinks(False)
+
+        def reveal_localurl_in_file_manager(url: str):
+            return utils.reveal_in_file_manager(Path(QUrl(url).toLocalFile()))
+        self.debug_info.linkActivated.connect(
+            reveal_localurl_in_file_manager
+        )
 
         self.end_info: StdInfo = StdInfo(
             'End',
@@ -472,7 +485,7 @@ class App(Resizable):
         t = CleanUpThread(self)
         t.start()
         logger.debug(f'Cleaning up {path}')
-        self.destroyed.connect(t.terminate)
+        # self.destroyed.connect(t.terminate)
 
     def show_slides(self) -> None:
         t = self.media_thread
@@ -493,6 +506,8 @@ class App(Resizable):
                 self.MediaPlayer.setPlaybackRate(self.rate)
         else:
             self.MediaPlayer.setPlaybackRate(0)
+            if self.debug_info.isVisible():
+                self.play_now_source_by_time(self.MediaPlayer._player.get_time())
 
     def on_key(self, e) -> None:
         match e.key():
@@ -532,14 +547,15 @@ class App(Resizable):
         if self.play_now[1] != source:
             self._play_now_source_signal.emit(source)
             self.play_now[1] = source
-            self.debug_info.display(*self.play_now)
+            if self.debug_info.isVisible():
+                self.debug_info.display(*self.play_now)
+            # self.debug_info_test.setText(self.debug_info_text_func(*self.play_now))
 
     def toggle_debug(self) -> None:
         debug_is_visible = not self.debug_info.isVisible()
         self.debug_info.setVisible(debug_is_visible)
         if isinstance(self.MediaPlayer, VLCMediaPlayer):
             if debug_is_visible:
-                print(f'{self.timeline=}')
                 self.MediaPlayer.attachTimer(self.play_now_source_by_time)
             else:
                 self.MediaPlayer.deattachTimer()
@@ -618,3 +634,21 @@ class App(Resizable):
 
     def set_ffmpeg_loglevel(self, value: Optional[FFMPEGObject.LogLevel | bool] = None) -> None:
         self.media_thread.loglevel = value
+
+    @staticmethod
+    def debug_info_text_func(fpath: str, sourcepath: str, *args: str) -> str:
+        lines = []
+        fp = Path(fpath)
+        if fp.is_relative_to('.'):
+            fp = fp.relative_to('.')
+        furl = QUrl.fromLocalFile(str(fp.absolute())).toString()
+        lines.append(f'path: <a href="{furl}">{fp}</a>')
+        if sourcepath:
+            sp = Path(sourcepath)
+            if sp.is_relative_to("."):
+                sp = sp.relative_to(".")
+            surl = QUrl.fromLocalFile(str(sp.absolute())).toString()
+            lines.append(f'source: <a href="{surl}">{sp}</a>')
+        lines.extend(args)
+        l = '<br>'.join(lines)
+        return l
