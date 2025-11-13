@@ -593,7 +593,6 @@ class App(Resizable):
         # self.MediaPlayer.showSubtitle(debug_is_visible)  # pyright: ignore[reportAttributeAccessIssue]
 
     def end_of_media(self, status) -> None:
-        print(f'{status=}')
         if status == self.MediaPlayer.MediaStatus.EndOfMedia:
             self.play_next()
 
